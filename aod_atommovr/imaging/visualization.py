@@ -4,10 +4,10 @@ Replays a round's move batches geometrically over a snapshot occupancy grid
 and renders one lattice panel per batch, with move arrows — distinct from
 the camera-image synthesis in :mod:`.generation`. ``visualize_move_batches``/
 ``render_move_batch_frames`` work from a plain occupancy array (not a live,
-physics-aware ``AtomArray``), since their caller — the ``session_recorder``
-package's ``RoundHook`` — only ever sees round snapshots
-(``RoundContext.occupancy`` + ``RoundContext.move_batches``), never the live
-array; so moves are drawn as intended (no collision/failure detection).
+physics-aware ``AtomArray``) so they can run from a ``RoundContext`` snapshot
+(``RoundContext.occupancy`` + ``RoundContext.move_batches``) alone, without
+needing the live array; so moves are drawn as intended (no collision/failure
+detection).
 ``visualize_batch_moves_on_image`` below is unrelated and still uses a live
 ``AtomArray`` for its own physics-aware replay.
 """
@@ -238,8 +238,7 @@ def render_move_batch_frames(
     """Render each round snapshot (initial state + one frame per move
     batch — same simulation and per-panel drawing as
     :func:`visualize_move_batches`) as an independent RGB ``uint8`` array,
-    for animating into a GIF — e.g. via the ``session_recorder`` package's
-    ``RoundHook``.
+    for animating into a GIF.
 
     Unlike :func:`visualize_move_batches` (one static multi-panel figure),
     this returns one array per snapshot at a fixed ``figsize``/``dpi`` (so

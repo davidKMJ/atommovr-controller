@@ -29,8 +29,6 @@ awg_controller/native/*.o
 awg_controller/native/*.so
 awg_controller/native/tests/test_phase
 awg_controller/native/tests/test_schedule
-awg_controller/native/tests/bench_render
-awg_controller/native/tests/card_info
 
 # Claude Code
 .claude/

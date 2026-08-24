@@ -1,18 +1,4 @@
-/* GPU rendering of a span of the round.
- *
- * One launch renders an arbitrary [abs_start, abs_start+n_frames) window
- * straight out of the device-resident schedule -- there is no per-batch
- * launch and no whole-round buffer. That is what makes 5 us batches viable:
- * a launch costs ~5 us, so launch-per-batch rendering would be barely
- * real-time no matter how fast the arithmetic is.
- *
- * Sampling past the end of the round keeps holding the final state, because
- * awg_schedule_batch_at clamps to the last batch, so the indefinite park
- * needs no special case here.
- *
- * Phase arithmetic is integer (see phase.h); only the reduced [0,1) fraction
- * reaches float, where __sinf runs on the SFUs at full rate.
- */
+/* GPU rendering of a span of the round. */
 
 #ifndef AWG_ENGINE_RENDER_CUH
 #define AWG_ENGINE_RENDER_CUH
@@ -44,7 +30,7 @@ static inline void awg_device_schedule_free(AwgDeviceSchedule* d) {
     d->total_samples = 0;
 }
 
-/* Copy a host schedule to the device. ~2 MB for 500 batches x 60 tones. */
+/* Copy a host schedule to the device. */
 static inline cudaError_t awg_device_schedule_upload(AwgDeviceSchedule* d,
                                                      const AwgSchedule* h) {
     awg_device_schedule_free(d);
@@ -67,13 +53,7 @@ static inline cudaError_t awg_device_schedule_upload(AwgDeviceSchedule* d,
     return cudaMemcpy(d->batch_start, h->batch_start, bs_bytes, cudaMemcpyHostToDevice);
 }
 
-/* One thread per frame, emitting BOTH channels as a single 32-bit store.
- *
- * The previous shape used grid.y for the channel and wrote out[i*2+ch], i.e.
- * 2-byte stores at 4-byte stride, so each warp touched 128 bytes to write 64
- * and the two channels lived in different blocks -- partial-sector writes that
- * cannot coalesce. Packing the pair lets a warp write 128 contiguous bytes.
- */
+/* One thread per frame, emitting BOTH channels as a single 32-bit store. */
 __global__ void awg_render_kernel(const AwgSegment* __restrict__ segments,
                                   const int64_t* __restrict__ batch_start, int32_t n_batches,
                                   int32_t n_tones_total, int32_t n_tones0, int32_t n_tones1,
@@ -103,8 +83,7 @@ __global__ void awg_render_kernel(const AwgSegment* __restrict__ segments,
                 seg->amplitude;
     }
 
-    /* seg->amplitude is normalised (amplitude_pct/100), matching scapp.py so
-     * the host tests can compare directly; DAC scaling happens here. */
+    /* seg->amplitude is normalised (amplitude_pct/100); DAC scaling happens here. */
     const int32_t s0 = __float2int_rn(fminf(fmaxf(acc0, -1.0f), 1.0f) * max_value);
     const int32_t s1 = __float2int_rn(fminf(fmaxf(acc1, -1.0f), 1.0f) * max_value);
     out[i] = ((uint32_t)(uint16_t)(int16_t)s1 << 16) | (uint32_t)(uint16_t)(int16_t)s0;

@@ -23,7 +23,7 @@ packages = [
     "aod_atommovr.imaging",
     "aod_atommovr.imaging.optimization",
     "awg_controller",
-    "session_recorder",
+    "recorder",
 ]
 
 [tool.uv.workspace]
@@ -49,4 +49,4 @@ hardware = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["awg_controller/tests", "aod_atommovr/tests", "session_recorder/tests"]
+testpaths = ["awg_controller/tests", "aod_atommovr/tests", "recorder/tests"]

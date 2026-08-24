@@ -1,4 +1,5 @@
 """
+Author: Claude Code, David Ko
 Python control surface for the native SCAPP engine (``awg_controller/native``).
 
 A round (a sequence of :class:`~awg_controller.awg_control.AWGBatch`) is
@@ -7,33 +8,29 @@ There are two modes, differing only in how samples get there:
 
 ``"stream"``
     FIFO replay. Samples are rendered on the GPU just ahead of the card's read
-    pointer, straight into the SCAPP RDMA ring. Round length is unbounded --
-    memory is the ring alone -- but PCIe must sustain ``sample_rate * 4`` B/s
-    forever, which an M4i's Gen2 x8 link cannot do much above 500 MS/s
-    two-channel. Use for long, slow, watch-it-on-a-scope rounds.
+    pointer, straight into the SCAPP RDMA ring. Round length is unbounded,
+    but the sample rate is capped due to the card's PCIe link speed.
+    Use for long, slow, watch-it-on-a-scope rounds.
 
 ``"memory"``
     Sequence replay from the card's own DRAM. The whole round is rendered up
     front and uploaded once, so there is no sustained streaming and the card
     runs at its full 1.25 GS/s. Round length is capped by
-    ``dma_buffer_samples`` (see :meth:`AWGEngine.max_round_duration_s`). Use
-    for real experiment rounds, which are milliseconds long.
-
-Both modes park on the round's final frequencies indefinitely and
-phase-exactly. Tone count per channel is fixed at construction
-(``AODSettings.grid_rows``/``grid_cols``) and every batch must supply a ramp
-for every tone, matching ``RFConverter``'s full-grid-every-batch invariant.
+    ``dma_buffer_samples``. Use for real experiment rounds, which are milliseconds long.
 """
 
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import subprocess
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
 from awg_controller.awg_control import AODSettings, AWGBatch
+
+log = logging.getLogger(__name__)
 
 #: Hard safety ceiling, asserted before awg_engine_open is ever called.
 MAX_SAFE_OUTPUT_V: float = 2.0
@@ -97,9 +94,9 @@ def _build_native_library() -> None:
         raise RuntimeError(
             f"awg_engine native source directory not found: {NATIVE_DIR}"
         )
-    print(f"[INFO] Building {LIB_PATH} via `make` in {NATIVE_DIR} ...")
+    log.info("Building %s via `make` in %s ...", LIB_PATH, NATIVE_DIR)
     subprocess.run(["make"], check=True, cwd=NATIVE_DIR)
-    print("[INFO] Build completed.")
+    log.info("Build completed.")
 
 
 _lib_handle: Optional[ctypes.CDLL] = None
@@ -139,7 +136,7 @@ def _configure_signatures(lib: ctypes.CDLL) -> None:
     lib.awg_engine_last_error.restype = ctypes.c_char_p
 
     lib.awg_engine_stop.argtypes = [ctypes.c_void_p]
-    lib.awg_engine_stop.restype = None
+    lib.awg_engine_stop.restype = ctypes.c_int
 
     lib.awg_engine_close.argtypes = [ctypes.c_void_p]
     lib.awg_engine_close.restype = None
@@ -165,6 +162,21 @@ def _lib() -> ctypes.CDLL:
     _configure_signatures(lib)
     _lib_handle = lib
     return lib
+
+
+def _native_error(handle: Optional[int] = None) -> Optional[str]:
+    """Decode ``awg_engine_last_error``. ``handle is None`` reads the
+    process-level buffer used when ``open()`` fails before a handle exists.
+    """
+    msg = _lib().awg_engine_last_error(handle)
+    if not msg:
+        return None
+    return msg.decode("utf-8", errors="replace")
+
+
+def _raise_native(what: str, handle: Optional[int] = None) -> None:
+    detail = _native_error(handle) or "unknown error"
+    raise RuntimeError(f"{what} failed: {detail}")
 
 
 # ---------------------------------------------------------------------------
@@ -205,16 +217,7 @@ class AWGEngineConfig:
     #: "stream" (FIFO, unbounded length, rate-limited) or "memory" (sequence
     #: replay from card DRAM, full rate, bounded length).
     mode: str = "stream"
-    #: STREAM only: frames rendered per DMA notification. WAITDMA wakes once
-    #: per chunk, so notify_samples/sample_rate is the render budget; the
-    #: ring absorbs jitter but not the average rate. 262144 gives ~210 us of
-    #: headroom at 1.25 GS/s -- smaller chunks (e.g. 16384, ~13 us) underrun.
     notify_samples: int = 262144
-    #: STREAM: ring depth / jitter budget. MEMORY: upload staging buffer,
-    #: i.e. the maximum round length. Either way this is pinned for GPUDirect
-    #: RDMA and must fit the GPU's BAR1 aperture (`nvidia-smi -q | grep -A3
-    #: "BAR1 Memory Usage"`; frames are 4 bytes -- a 256 MB BAR1 tops out
-    #: near 48M frames).
     dma_buffer_samples: int = 16 * 1024 * 1024
     fill_start_threshold_promille: int = 800
     #: MEMORY only: length of the looped park segment the card rests on
@@ -222,11 +225,7 @@ class AWGEngineConfig:
     #: cycles of every tone (frequencies snap to the resulting
     #: sample_rate/hold_tail_samples grid).
     hold_tail_samples: int = 1 << 20
-    #: None -> the card's maximum. Safe in MEMORY mode. In STREAM mode, an
-    #: M4i.6631-x8's Gen2 x8 PCIe link sustains roughly 500-800 MS/s
-    #: two-channel (well under its 1.25 GS/s onboard-replay maximum) --
-    #: raise only against a measured link rate; exceeding it underruns
-    #: partway into the round rather than failing at startup.
+    #: None -> the card's maximum. Safe in MEMORY mode.
     sample_rate_hz: Optional[float] = 500e6
     #: Frequency-ramp shape for non-static moves ("linear" | "scurve").
     ramp_shape: str = "linear"
@@ -303,9 +302,7 @@ class AWGEngine:
         )
         handle = lib.awg_engine_open(ctypes.byref(cfg))
         if not handle:
-            raise RuntimeError(
-                "awg_engine_open failed -- see stderr above for the native error message."
-            )
+            _raise_native("awg_engine_open")
         self._handle = handle
 
         sample_rate_hz = lib.awg_engine_sample_rate_hz(handle)
@@ -321,19 +318,17 @@ class AWGEngine:
         return sample_rate_hz
 
     def load_round(self, batches: Sequence[AWGBatch]) -> None:
-        """Resolve *batches* (a full round, played back-to-back) into a
+        """Resolve batches (a full round, played back-to-back) into a
         segment schedule, replacing any previously loaded round.
 
-        In ``"stream"`` mode this builds only the schedule (~2 MB for 500
-        batches x 60 tones) and is cheap; samples are rendered during
+        In ``"stream"`` mode this builds only the schedule and is cheap; samples are rendered during
         :meth:`play`. In ``"memory"`` mode it also renders the whole round and
         uploads it to the card, so this is the expensive call and it will
         raise if the round exceeds :attr:`max_round_duration_s`.
 
         Every batch must supply a ramp for every tone (``grid_rows +
         grid_cols`` ramps), and the first batch's ``f_start`` per tone is
-        treated as the pre-existing resting frequency -- matching
-        ``awg_controller.scapp.synthesize_round_waveform``.
+        treated as the pre-existing resting frequency.
 
         Once the round is exhausted the engine parks on the final
         frequencies, indefinitely and phase-exactly, until :meth:`stop`.
@@ -367,13 +362,11 @@ class AWGEngine:
             self._handle, travel_durations_s, n_batches, ramps, n_ramps, counts, shape
         )
         if rc != 0:
-            raise RuntimeError(f"awg_engine_load_round failed: {self.last_error}")
+            _raise_native("awg_engine_load_round", self._handle)
 
     @property
     def look_ahead_s(self) -> float:
-        """STREAM: seconds of waveform the ring holds -- the jitter budget.
-        A stall longer than this underruns.
-        """
+        """STREAM: seconds of waveform the ring holds. A stall longer than this underruns."""
         self._require_open()
         return self._config.dma_buffer_samples / self.sample_rate_hz
 
@@ -407,7 +400,7 @@ class AWGEngine:
         self._require_open()
         rc = _lib().awg_engine_play(self._handle)
         if rc != 0:
-            raise RuntimeError(f"awg_engine_play failed: {self.last_error}")
+            _raise_native("awg_engine_play", self._handle)
 
     @property
     def sample_rate_hz(self) -> float:
@@ -421,27 +414,46 @@ class AWGEngine:
 
     @property
     def last_error(self) -> Optional[str]:
-        if self._handle is None:
+        if self._handle is not None:
+            return _native_error(self._handle)
+        if _lib_handle is None:
             return None
-        msg = _lib().awg_engine_last_error(self._handle)
-        return msg.decode() if msg else None
+        return _native_error(None)
 
     def stop(self) -> None:
         """Halts playback (if running). The card stays open -- load_round()
         and play() again without reopening.
+
+        Raises ``RuntimeError`` if the STREAM pump latched a failure after
+        :meth:`play` returned (underrun, CUDA error, card error). A subsequent
+        :meth:`stop` is a no-op success. :meth:`close` logs the same failure
+        instead of raising, so ``with``-block cleanup cannot mask another
+        exception.
         """
-        if self._handle is not None:
-            _lib().awg_engine_stop(self._handle)
+        if self._handle is None:
+            return
+        rc = _lib().awg_engine_stop(self._handle)
+        if rc != 0:
+            _raise_native("awg_engine_stop", self._handle)
 
     def close(self) -> None:
         """Stops (if needed) and releases the card + GPU resources."""
-        if self._handle is not None:
-            _lib().awg_engine_close(self._handle)
-            self._handle = None
+        if self._handle is None:
+            return
+        handle = self._handle
+        self._handle = None
+        lib = _lib()
+        rc = lib.awg_engine_stop(handle)
+        if rc != 0:
+            log.error(
+                "awg_engine_stop failed: %s",
+                _native_error(handle) or "unknown error",
+            )
+        lib.awg_engine_close(handle)
 
     def _require_open(self) -> None:
         if self._handle is None:
-            raise RuntimeError("call open() first")
+            raise RuntimeError("AWGEngine.open() has not been called")
 
     def __enter__(self) -> "AWGEngine":
         self.open()

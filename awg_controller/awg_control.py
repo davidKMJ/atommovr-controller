@@ -1,10 +1,6 @@
 """
 AWG (Arbitrary Waveform Generator) control utilities for the atommovr pipeline.
 
-Converts logical atom ``Move`` objects into RF ramp commands (``AWGBatch``)
-executed on Spectrum Instrumentation cards via the SCAPP GPU-generation
-backend (``awg_controller.scapp``).
-
 Amplitude unit : percent of full-scale  (sum ≤ 40 % per channel, per manufacturer)
 Frequency unit : Hz
 Phase unit     : degrees
@@ -14,28 +10,19 @@ Time unit      : seconds
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from atommovr.utils.Move import Move
 from atommovr.utils.core import PhysicalParams
-from atommovr.utils.timing import MIN_MOVE_DURATION_S, travel_duration_s
+from atommovr.utils.timing import travel_duration_s
 
 # ---------------------------------------------------------------------------
-# Hardware constants  (source of truth: cli.py + spcm documentation)
+# Hardware constants
 # ---------------------------------------------------------------------------
 
 #: Combined amplitude of all simultaneous tones on one output channel must
 #: not exceed 40 % of full-scale (manufacturer recommendation).
 MAX_AMPLITUDE_PCT_PER_CHANNEL: float = 40.0
-
-#: Maximum sample rate of the Spectrum Instrumentation M4i.6631-x8 (16-bit,
-#: 2-channel, PCIe x8 Gen2). ``AWGEngine.open()`` negotiates this unless
-#: ``AWGEngineConfig.sample_rate_hz`` overrides it. Note: sustained
-#: FIFO/SCAPP streaming over PCIe x8 Gen2 caps around ~700 MHz at
-#: 16-bit/2-channel ("in excess of 2.8 GB/s" per the datasheet) -- below
-#: this 1.25 GS/s onboard-replay maximum, so real ``sample_rate_hz``
-#: choices should stay verified on real hardware.
-M4I_6631_X8_MAX_SAMPLE_RATE_HZ: float = 1.25e9
 
 
 # ---------------------------------------------------------------------------
@@ -52,24 +39,23 @@ class AODSettings:
     """
 
     # Frequency ranges (Hz)
-    f_min_v: float = 60e6
-    f_max_v: float = 100e6
-    f_min_h: float = 60e6
-    f_max_h: float = 100e6
+    f_min_v: float = 85e6
+    f_max_v: float = 121e6
+    f_min_h: float = 85e6
+    f_max_h: float = 121e6
 
-    # Total trap-grid dimensions (DDS tone counts)
+    # Total trap-grid dimensions
     grid_rows: int = 10
     grid_cols: int = 10
 
-    # Target sub-array dimensions (informational, used by the controller)
+    # Target sub-array dimensions
     target_rows: int = 6
     target_cols: int = 6
 
     alignment: str = "center"  # "center" | "start"
 
-    #: Approximate trap shift per MHz (µm/MHz).  Optics ballpark (~6.53 for
-    #: the Zwierlein 808 nm / f1=75 / f2=400 / f_obj=28 setup); not used for RF.
-    um_per_mhz: float = 6.526
+    #: Approximate trap shift per MHz (µm/MHz)
+    um_per_mhz: Optional[float] = None
 
     @property
     def f_spacing_v(self) -> float:
@@ -100,8 +86,6 @@ class RFRamp:
     ----------
     channel : int
         Hardware output channel (0 = V/row AOD, 1 = H/col AOD).
-    core : int
-        Mirrors ``tone_index``; no hardware meaning under SCAPP.
     f_start : float
         Pre-move frequency (Hz) — the current trap position.
     f_end : float
@@ -112,18 +96,14 @@ class RFRamp:
     phase_deg : float
         Tone phase offset (degrees), default 0.
     duration_s : float
-        Travel duration (s) — Chebyshev × spacing / ``AOD_speed`` via
-        ``atommovr.utils.timing.travel_duration_s`` — used as the GPU
-        ramp-segment duration.
+        Travel duration (s) — Chebyshev × spacing / ``AOD_speed``
     tone_index : int
         Row index (channel 0) / column index (channel 1) this ramp
-        addresses, always set by ``RFConverter``. Used to track per-tone
-        phase continuity across GPU buffer fills. Default -1 only for
+        addresses, always set by ``RFConverter``. Default -1 only for
         ad-hoc ``RFRamp(...)`` constructions that don't care (e.g. tests).
     """
 
     channel: int
-    core: int
     f_start: float
     f_end: float
     amplitude_pct: float
@@ -134,13 +114,7 @@ class RFRamp:
 
 @dataclass
 class AWGBatch:
-    """Set of RF commands for one parallel move batch.
-
-    ``travel_duration_s`` is the batch's travel window (Chebyshev × spacing /
-    ``AOD_speed``), matching :func:`atommovr.utils.timing.travel_duration_s`.
-    It is a single window, not a sum; totals across batches are named
-    ``total_travel_duration_s``.
-    """
+    """Set of RF commands for one parallel move batch."""
 
     ramps: List[RFRamp]
     travel_duration_s: float
@@ -154,15 +128,8 @@ class AWGBatch:
 class RFConverter:
     """Translate logical ``Move`` objects into ``AWGBatch`` hardware commands.
 
-    Amplitude budget rule (from cli.py comments):
-        Per-core amplitude = 40 % / n_simultaneous_tones_on_channel
-
-    Move travel duration is computed by
-    :func:`atommovr.utils.timing.travel_duration_s` (Chebyshev × spacing /
-    ``AOD_speed``).  Parallel V and H tones overlap in time.
-
-    Site frequencies are index-linear over ``AODSettings`` ``[f_min, f_max]``,
-    matching the grid indices produced by imaging (blob → rotate → assign).
+    Amplitude budget rule:
+        Per-tone amplitude = 40 % / n_simultaneous_tones_on_channel
 
     Parameters
     ----------
@@ -177,21 +144,6 @@ class RFConverter:
     ) -> None:
         self.settings = settings
         self.params = physical_params
-        # No DDS-core concept under SCAPP -- tones are software-summed
-        # sines, so there's no fixed hardware tone-count ceiling. Always
-        # sequential, uncapped.
-        self._core_map = {
-            0: list(range(settings.grid_rows)),
-            1: list(range(settings.grid_cols)),
-        }
-
-    @property
-    def core_map(self) -> Dict[int, List[int]]:
-        """Per-channel tone index list (identical to ``RFRamp.tone_index``
-        values), computed at construction time. No hardware meaning under
-        SCAPP -- kept for indexing convenience.
-        """
-        return self._core_map
 
     # ------------------------------------------------------------------
     # Helpers
@@ -220,34 +172,32 @@ class RFConverter:
     def holding_config(self) -> AWGBatch:
         """Static holding batch: every grid site at its resting frequency.
 
-        All ``grid_rows`` V-cores and ``grid_cols`` H-cores are set with
+        All ``grid_rows`` V-tones and ``grid_cols`` H-tones are set with
         ``f_start == f_end`` (no motion).  Sent to the card between
         rearrangement rounds so atoms remain trapped.
         """
-        v_cores = self._core_map[0]
-        h_cores = self._core_map[1]
-        amp_v = self._per_tone_amplitude(len(v_cores))
-        amp_h = self._per_tone_amplitude(len(h_cores))
+        n_v = self.settings.grid_rows
+        n_h = self.settings.grid_cols
+        amp_v = self._per_tone_amplitude(n_v)
+        amp_h = self._per_tone_amplitude(n_h)
 
         ramps: List[RFRamp] = []
-        for i, core in enumerate(v_cores):
+        for i in range(n_v):
             f = self._row_to_freq(i)
             ramps.append(
                 RFRamp(
                     channel=0,
-                    core=core,
                     f_start=f,
                     f_end=f,
                     amplitude_pct=amp_v,
                     tone_index=i,
                 )
             )
-        for j, core in enumerate(h_cores):
+        for j in range(n_h):
             f = self._col_to_freq(j)
             ramps.append(
                 RFRamp(
                     channel=1,
-                    core=core,
                     f_start=f,
                     f_end=f,
                     amplitude_pct=amp_h,
@@ -284,10 +234,10 @@ class RFConverter:
             return self.holding_config()
 
         duration_s = self._travel_duration_s(moves)
-        v_cores = self._core_map[0]
-        h_cores = self._core_map[1]
-        amp_v = self._per_tone_amplitude(len(v_cores))
-        amp_h = self._per_tone_amplitude(len(h_cores))
+        n_v = self.settings.grid_rows
+        n_h = self.settings.grid_cols
+        amp_v = self._per_tone_amplitude(n_v)
+        amp_h = self._per_tone_amplitude(n_h)
 
         # Build source → destination maps for each axis
         row_targets: Dict[int, int] = {}
@@ -306,21 +256,17 @@ class RFConverter:
             row_targets[m.from_row] = m.to_row
             col_targets[m.from_col] = m.to_col
 
-        grid_rows = self.settings.grid_rows
-        grid_cols = self.settings.grid_cols
-
         ramps: List[RFRamp] = []
-        for row_idx, core in enumerate(v_cores):
+        for row_idx in range(n_v):
             target_row = row_targets.get(row_idx, row_idx)
-            if target_row < 0 or target_row >= grid_rows:
+            if target_row < 0 or target_row >= n_v:
                 raise ValueError(
                     f"Row move targets out-of-bounds index {target_row} "
-                    f"(grid has {grid_rows} rows)."
+                    f"(grid has {n_v} rows)."
                 )
             ramps.append(
                 RFRamp(
                     channel=0,
-                    core=core,
                     f_start=self._row_to_freq(row_idx),
                     f_end=self._row_to_freq(target_row),
                     amplitude_pct=amp_v,
@@ -328,17 +274,16 @@ class RFConverter:
                     tone_index=row_idx,
                 )
             )
-        for col_idx, core in enumerate(h_cores):
+        for col_idx in range(n_h):
             target_col = col_targets.get(col_idx, col_idx)
-            if target_col < 0 or target_col >= grid_cols:
+            if target_col < 0 or target_col >= n_h:
                 raise ValueError(
                     f"Column move targets out-of-bounds index {target_col} "
-                    f"(grid has {grid_cols} columns)."
+                    f"(grid has {n_h} columns)."
                 )
             ramps.append(
                 RFRamp(
                     channel=1,
-                    core=core,
                     f_start=self._col_to_freq(col_idx),
                     f_end=self._col_to_freq(target_col),
                     amplitude_pct=amp_h,

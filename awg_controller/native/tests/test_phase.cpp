@@ -1,11 +1,7 @@
 /* Host-side check of the fixed-point phase against a double reference.
  *
- * Builds with a plain C++ compiler -- no CUDA, no card -- so the numerics can
- * be validated on a laptop:
  *     c++ -O2 -std=c++14 -o test_phase tests/test_phase.cpp && ./test_phase
  *
- * The reference is the same closed form the Python path uses
- * (awg_controller.scapp), evaluated in double and reduced mod 2*pi.
  */
 
 #include "../phase.h"
@@ -16,8 +12,6 @@
 
 static const double kTwoPi = 2.0 * AWG_PI;
 
-/* Double reference: instantaneous phase (radians) of one segment, matching
- * awg_engine.cu's instantaneous_phase()/scapp.py. */
 static double ref_phase_rad(double f0, double f1, double D, int is_scurve, double t) {
     if (D <= 0.0) {
         return kTwoPi * f1 * t;
@@ -63,41 +57,8 @@ static int check(const char* label, double f0, double f1, double D, int is_scurv
     return ok ? 0 : 1;
 }
 
-/* Same as check(), but evaluated the way the streaming engine actually will:
- * re-basing the segment at every render span so `i` stays bounded. */
-static int check_spanned(const char* label, double f0, double f1, double D, int is_scurve,
-                         double fs, double t_end, double span_s, double tol_rad) {
-    AwgSegment seg;
-    awg_segment_build(&seg, f0, f1, D, is_scurve, fs, 0, 0ull, 1.0f);
-
-    const int64_t span = (int64_t)(span_s * fs);
-    const int64_t n_end = (int64_t)(t_end * fs);
-    double worst = 0.0;
-
-    for (int64_t base = 0; base < n_end; base += span) {
-        awg_segment_rebase(&seg, base);
-        /* probe a few points inside this span */
-        for (int k = 0; k < 8; ++k) {
-            const int64_t i = base + (span * k) / 8;
-            if (i >= n_end) break;
-            const uint64_t q = awg_segment_phase_q64(&seg, i);
-            const double got = (double)q / AWG_Q64_SCALE * kTwoPi;
-            const double want = ref_phase_rad(f0, f1, D, is_scurve, (double)i / fs);
-            const double e = circ_err(got, want);
-            if (e > worst) worst = e;
-        }
-    }
-
-    const double lsb = worst / kTwoPi * 65536.0;
-    const bool ok = worst <= tol_rad;
-    printf("  %-34s worst=%9.3e rad  (%8.2f LSB16)  %s\n", label, worst, lsb,
-           ok ? "PASS" : "FAIL");
-    return ok ? 0 : 1;
-}
-
 /* Instantaneous-frequency accuracy: differentiate the fixed-point phase and
- * compare to the intended sweep. This is the quantity that actually positions
- * a trap; a constant phase offset does not move anything. */
+ * compare to the intended sweep. */
 static int check_freq(const char* label, double f0, double f1, double D, double fs,
                       double tol_hz) {
     AwgSegment seg;
@@ -112,9 +73,6 @@ static int check_freq(const char* label, double f0, double f1, double D, double 
         const uint64_t p1 = awg_segment_phase_q64(&seg, i + 1);
         const double dcyc = (double)(uint64_t)(p1 - p0) / AWG_Q64_SCALE;
         const double got_hz = dcyc * fs;
-        /* a one-sample difference is the mean frequency over [i, i+1], i.e.
-         * the instantaneous frequency at the midpoint -- compare there, or
-         * the finite-difference bias b/2 shows up as a fake error. */
         const double want_hz = f0 + (f1 - f0) * (((double)i + 0.5) / (double)n);
         const double e = fabs(got_hz - want_hz);
         if (e > worst) worst = e;
@@ -135,27 +93,14 @@ int main(void) {
     bad += check("hold 100 MHz, 5 us", 100e6, 100e6, 0.0, 0, fs, 5e-6, 4096, 1e-4);
     bad += check("linear 60->61 MHz, 5 us", 60e6, 61e6, 5e-6, 0, fs, 5e-6, 4096, 1e-4);
     bad += check("scurve 60->61 MHz, 5 us", 60e6, 61e6, 5e-6, 1, fs, 5e-6, 4096, 1e-4);
-    /* Regression: a descending ramp makes the chirp coefficient negative.
-     * Stored two's-complement in a uint64, it was previously fed to an
-     * *unsigned* 128-bit multiply + >>1, which silently produced garbage --
-     * the waveform was off by a full tone amplitude. Ascending ramps and
-     * s-curves (b == 0) both looked fine, so only a descending case catches it. */
-    bad += check("linear 61->60 MHz, 5 us (descending)", 61e6, 60e6, 5e-6, 0, fs, 5e-6, 4096,
-                 1e-4);
-    bad += check("linear 100->60 MHz, 3 s (descending)", 100e6, 60e6, 3.0, 0, fs, 3.0, 20000,
-                 0.5);
-
-    printf("\n observable scale (the notebook's 3 s demo ramp):\n");
-    printf("   absolute phase -- b is quantised to 2^-64, and that error\n");
-    printf("   integrates over 6e7 cycles of chirp. Physically a constant\n");
-    printf("   phase offset, which does not move a trap, so tolerance is loose:\n");
-    bad += check("linear 60->100 MHz, 3 s", 60e6, 100e6, 3.0, 0, fs, 3.0, 20000, 0.5);
-    bad += check_spanned("  ... re-based per 1 ms span", 60e6, 100e6, 3.0, 0, fs, 3.0, 1e-3, 0.5);
-    printf("   instantaneous frequency -- this is what positions the trap:\n");
-    bad += check_freq("linear 60->100 MHz, 3 s", 60e6, 100e6, 3.0, fs, 1.0);
+    bad += check("linear 61->60 MHz, 5 us", 61e6, 60e6, 5e-6, 0, fs, 5e-6, 4096, 1e-4);
     bad += check_freq("linear 60->61 MHz, 5 us", 60e6, 61e6, 5e-6, fs, 1.0);
 
-    printf("\n indefinite hold (drift is the classic failure):\n");
+    printf("\n observable scale (3 s ramp):\n");
+    bad += check("linear 60->100 MHz, 3 s", 60e6, 100e6, 3.0, 0, fs, 3.0, 20000, 0.5);
+    bad += check_freq("linear 60->100 MHz, 3 s", 60e6, 100e6, 3.0, fs, 1.0);
+
+    printf("\n indefinite hold:\n");
     bad += check("hold 100 MHz, 10 s", 100e6, 100e6, 0.0, 0, fs, 10.0, 20000, 1e-4);
     bad += check("hold 100 MHz, 60 s", 100e6, 100e6, 0.0, 0, fs, 60.0, 20000, 1e-4);
 

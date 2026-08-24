@@ -1,21 +1,4 @@
-/* STREAM mode: render just ahead of the card's read pointer.
- *
- * Memory is the RDMA ring alone, so round length is unbounded. The ring
- * absorbs *jitter* -- a stall shorter than its depth is ridden out -- but it
- * does not relax the average rate. In steady state WAITDMA wakes once per
- * notify chunk and this loop renders one chunk per wake, so each render must
- * finish within notify_samples/sample_rate. At 1.25 GS/s a 16384-frame chunk
- * is 13 us, about one kernel launch, and underruns; 262144 gives 210 us.
- * Size notify_samples for the render budget, the ring for hiccup tolerance.
- *
- * `cursor` is an absolute sample index that never resets. Past the end of the
- * round the schedule clamps to the final batch, so the engine parks on the
- * last frequencies phase-exactly, with no chunk replay and hence no seam.
- *
- * NB: sustaining this needs sample_rate*4 B/s over PCIe forever. An M4i is
- * Gen2 x8, so beyond roughly 500-800 MS/s two-channel the card outruns its
- * own link no matter how this is tuned -- use MEMORY mode instead.
- */
+/* STREAM mode: render just ahead of the card's read pointer. */
 
 #ifndef AWG_ENGINE_STREAM_CUH
 #define AWG_ENGINE_STREAM_CUH
@@ -30,8 +13,9 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdarg>
+#include <cstdio>
 #include <mutex>
-#include <stdio.h>
 
 typedef struct AwgStreamCtx {
     drv_handle hCard;
@@ -46,29 +30,58 @@ typedef struct AwgStreamCtx {
     cudaStream_t stream;
 
     std::atomic<bool> stop_flag;
-    std::atomic<bool> running;
     bool card_started;
     bool start_failed;
     std::mutex start_mutex;
     std::condition_variable start_cv;
 
+    /* Optional engine latch: written on the first failure so last_error is
+     * visible while play() is still in flight. */
+    std::mutex* error_mutex;
+    char* last_error;
+    size_t last_error_len;
+
     int failed;
-    char err[256];
+    char err[512];
 } AwgStreamCtx;
 
-static inline void awg_stream_fail(AwgStreamCtx* c, const char* what, uint32_t code) {
-    if (!c->failed) {
-        snprintf(c->err, sizeof(c->err), "%s failed (spcm err %u)", what, code);
-        c->failed = 1;
+/* Latch the first failure. Print only if play() has already returned (the
+ * card has started): startup failures are raised by the play() caller. */
+static inline void awg_stream_report(AwgStreamCtx* c, const char* fmt, ...) {
+    if (c->failed) {
+        c->stop_flag.store(true, std::memory_order_relaxed);
+        return;
     }
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(c->err, sizeof(c->err), fmt, args);
+    va_end(args);
+    c->failed = 1;
     c->stop_flag.store(true, std::memory_order_relaxed);
+    if (c->last_error != nullptr && c->error_mutex != nullptr && c->last_error_len > 0) {
+        std::lock_guard<std::mutex> lock(*c->error_mutex);
+        snprintf(c->last_error, c->last_error_len, "%s", c->err);
+    }
+    if (c->card_started) {
+        fprintf(stderr, "[awg_engine] error: %s\n", c->err);
+    }
+}
+
+static inline void awg_stream_fail_spc(AwgStreamCtx* c, const char* what) {
+    uint32_t reg = 0;
+    int32_t val = 0;
+    char text[ERRORTEXTLEN] = {0};
+    if (c->hCard != nullptr) {
+        spcm_dwGetErrorInfo_i32(c->hCard, &reg, &val, text);
+    }
+    awg_stream_report(c, "%s failed: %s (register=0x%x value=%d)", what, text, reg, val);
 }
 
 static inline void awg_stream_pump(AwgStreamCtx* c) {
     /* The CUDA current device is per-thread: a fresh thread defaults to
      * device 0 whatever open() selected, and would render into a buffer it
      * does not own. */
-    cudaSetDevice(c->cuda_device_index);
+    const cudaError_t setdev = cudaSetDevice(c->cuda_device_index);
 
     const int32_t frame_bytes = 4;
     const int32_t notify_bytes = c->notify_frames * frame_bytes;
@@ -82,18 +95,25 @@ static inline void awg_stream_pump(AwgStreamCtx* c) {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     };
 
+    if (setdev != cudaSuccess) {
+        awg_stream_report(c, "cudaSetDevice failed: %s", cudaGetErrorString(setdev));
+    }
+
     while (!c->stop_flag.load(std::memory_order_relaxed)) {
         uint32_t dwErr = spcm_dwSetParam_i32(c->hCard, SPC_M2CMD, M2CMD_DATA_WAITDMA);
         if (dwErr == ERR_TIMEOUT) {
             continue;
         }
         if (dwErr != ERR_OK) {
-            fprintf(stderr,
-                    "[awg_engine] WAITDMA failed after producing %.6f s (sample %lld) "
-                    "in %.3f s wall; round is %.6f s\n",
-                    cursor / fs, (long long)cursor, elapsed(),
-                    c->sched->total_samples / fs);
-            awg_stream_fail(c, "M2CMD_DATA_WAITDMA", dwErr);
+            uint32_t reg = 0;
+            int32_t val = 0;
+            char text[ERRORTEXTLEN] = {0};
+            spcm_dwGetErrorInfo_i32(c->hCard, &reg, &val, text);
+            awg_stream_report(c,
+                              "M2CMD_DATA_WAITDMA failed after producing %.6f s (sample %lld) "
+                              "in %.3f s wall; round is %.6f s: %s (register=0x%x value=%d)",
+                              cursor / fs, (long long)cursor, elapsed(),
+                              c->sched->total_samples / fs, text, reg, val);
             break;
         }
 
@@ -118,19 +138,14 @@ static inline void awg_stream_pump(AwgStreamCtx* c) {
                 cerr = cudaStreamSynchronize(c->stream);
             }
             if (cerr != cudaSuccess) {
-                if (!c->failed) {
-                    snprintf(c->err, sizeof(c->err), "render failed: %s",
-                             cudaGetErrorString(cerr));
-                    c->failed = 1;
-                }
-                c->stop_flag.store(true, std::memory_order_relaxed);
+                awg_stream_report(c, "render failed: %s", cudaGetErrorString(cerr));
                 break;
             }
 
             const int32_t handed = (int32_t)(n * frame_bytes);
             dwErr = spcm_dwSetParam_i32(c->hCard, SPC_DATA_AVAIL_CARD_LEN, handed);
             if (dwErr != ERR_OK) {
-                awg_stream_fail(c, "SPC_DATA_AVAIL_CARD_LEN", dwErr);
+                awg_stream_fail_spc(c, "SPC_DATA_AVAIL_CARD_LEN");
                 break;
             }
             cursor += n;
@@ -147,7 +162,7 @@ static inline void awg_stream_pump(AwgStreamCtx* c) {
                 {
                     std::lock_guard<std::mutex> lock(c->start_mutex);
                     if (dwErr != ERR_OK) {
-                        awg_stream_fail(c, "M2CMD_CARD_START", dwErr);
+                        awg_stream_fail_spc(c, "M2CMD_CARD_START");
                         c->start_failed = true;
                     }
                     c->card_started = true;
@@ -162,9 +177,8 @@ static inline void awg_stream_pump(AwgStreamCtx* c) {
 
     /* produced < wall means the render or the link couldn't keep up;
      * produced == wall means the card was fed fine and stopped anyway. */
-    fprintf(stderr, "[awg_engine] pump exiting: produced %.6f s in %.3f s wall\n", cursor / fs,
-            elapsed());
-    c->running.store(false, std::memory_order_relaxed);
+    fprintf(stderr, "[awg_engine] info: pump exiting: produced %.6f s in %.3f s wall\n",
+            cursor / fs, elapsed());
     {
         /* never leave play() blocked on a pump that has exited */
         std::lock_guard<std::mutex> lock(c->start_mutex);

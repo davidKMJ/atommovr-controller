@@ -169,7 +169,7 @@ class TestRFConverter:
         batch = converter_10x5.holding_config()
         for ramp in batch.ramps:
             assert ramp.f_start == ramp.f_end, (
-                f"Core {ramp.core} on ch{ramp.channel}: "
+                f"Tone {ramp.tone_index} on ch{ramp.channel}: "
                 f"f_start={ramp.f_start} != f_end={ramp.f_end}"
             )
 
@@ -181,13 +181,15 @@ class TestRFConverter:
         assert ch0_total == pytest.approx(MAX_AMPLITUDE_PCT_PER_CHANNEL)
         assert ch1_total == pytest.approx(MAX_AMPLITUDE_PCT_PER_CHANNEL)
 
-    def test_holding_uses_correct_cores(self, converter_10x5: RFConverter):
-        """Each ramp must use a core from the correct channel."""
+    def test_holding_uses_correct_tones(self, converter_10x5: RFConverter):
+        """Each ramp's tone_index must be a valid row (ch0) or column (ch1)."""
         batch = converter_10x5.holding_config()
-        core_map = converter_10x5.core_map
+        n_v = converter_10x5.settings.grid_rows
+        n_h = converter_10x5.settings.grid_cols
         for ramp in batch.ramps:
-            assert ramp.core in core_map[ramp.channel], (
-                f"Core {ramp.core} not in ch{ramp.channel} map {core_map[ramp.channel]}"
+            n = n_v if ramp.channel == 0 else n_h
+            assert 0 <= ramp.tone_index < n, (
+                f"Tone {ramp.tone_index} out of range for ch{ramp.channel} (n={n})"
             )
 
     # -- convert_moves --
@@ -212,8 +214,8 @@ class TestRFConverter:
         batch = converter_4x3.convert_moves([move])
         # Find the row-0 ramp (ch0, should move to row 2)
         row_ramps = [r for r in batch.ramps if r.channel == 0]
-        # The core corresponding to row 0 should have f_end = freq(row 2)
-        row0_ramp = row_ramps[0]  # first core = row 0
+        # The tone corresponding to row 0 should have f_end = freq(row 2)
+        row0_ramp = row_ramps[0]  # first tone = row 0
         assert row0_ramp.f_start == pytest.approx(converter_4x3._row_to_freq(0))
         assert row0_ramp.f_end == pytest.approx(converter_4x3._row_to_freq(2))
 
@@ -222,9 +224,9 @@ class TestRFConverter:
         move = Hop(from_row=0, from_col=0, to_row=2, to_col=1)
         batch = converter_4x3.convert_moves([move])
         for ramp in batch.ramps:
-            if ramp.channel == 0 and ramp.core != converter_4x3.core_map[0][0]:
+            if ramp.channel == 0 and ramp.tone_index != 0:
                 assert ramp.f_start == ramp.f_end, (
-                    f"Non-moving ch0 core {ramp.core} changed frequency"
+                    f"Non-moving ch0 tone {ramp.tone_index} changed frequency"
                 )
 
     def test_amplitude_budget_during_moves(self, converter_4x3: RFConverter):
@@ -273,15 +275,18 @@ class TestRFConverter:
         assert batches[1].travel_duration_s > 0
         assert batches[2].travel_duration_s == 0  # empty → holding
 
-    # -- core map / tone index --
+    # -- tone index --
 
-    def test_core_map_sequential_and_uncapped(self):
-        """No fixed tone-count ceiling under SCAPP -- core_map is always
-        plain sequential indices, even for a large grid."""
+    def test_large_grid_emits_all_tones(self):
+        """No fixed tone-count ceiling: a large grid still emits one tone
+        per row and column, with sequential indices."""
         large = _make_simple_settings(grid_rows=25, grid_cols=8)
         conv = RFConverter(large, PhysicalParams())
-        assert conv.core_map[0] == list(range(25))
-        assert conv.core_map[1] == list(range(8))
+        holding = conv.holding_config()
+        v_idx = sorted(r.tone_index for r in holding.ramps if r.channel == 0)
+        h_idx = sorted(r.tone_index for r in holding.ramps if r.channel == 1)
+        assert v_idx == list(range(25))
+        assert h_idx == list(range(8))
 
     def test_tone_index_matches_row_col_enumeration(self):
         settings = _make_simple_settings(grid_rows=4, grid_cols=3)
@@ -415,14 +420,13 @@ class TestAlgorithmToRFPipeline:
                 f"Batch {i}: ch1 amp {ch1:.2f}% != {MAX_AMPLITUDE_PCT_PER_CHANNEL}%"
             )
 
-    def test_all_ramps_use_valid_cores(self, case):
-        """Every ramp core index must belong to its channel's assignment."""
+    def test_all_ramps_use_valid_tone_indices(self, case):
+        """Every ramp tone_index must be in range for its channel."""
         target_size = case["target_size"]
         grid_rows, grid_cols = target_size + 2, target_size + 2
 
         settings = _make_simple_settings(grid_rows=grid_rows, grid_cols=grid_cols)
         converter = RFConverter(settings, PhysicalParams())
-        core_map = converter.core_map
         arr = _build_array_with_target(grid_rows, grid_cols, target_size, target_size)
 
         algo = case["cls"]()
@@ -432,8 +436,9 @@ class TestAlgorithmToRFPipeline:
         rf_batches = converter.convert_sequence(move_batches)
         for batch in rf_batches:
             for ramp in batch.ramps:
-                assert ramp.core in core_map[ramp.channel], (
-                    f"Core {ramp.core} not in ch{ramp.channel} map"
+                n = grid_rows if ramp.channel == 0 else grid_cols
+                assert 0 <= ramp.tone_index < n, (
+                    f"Tone {ramp.tone_index} out of range for ch{ramp.channel} (n={n})"
                 )
 
     def test_ramp_count_covers_full_grid(self, case):
@@ -502,10 +507,10 @@ class TestControllerSimulation:
         ctrl.shutdown()
 
     def test_controller_creates_rf_converter(self, controller):
-        """Controller must initialise an RFConverter with correct core_map."""
+        """Controller must initialise an RFConverter matching hardware geometry."""
         assert controller.rf_converter is not None
-        assert 0 in controller.rf_converter.core_map
-        assert 1 in controller.rf_converter.core_map
+        assert controller.rf_converter.settings.grid_rows == 8
+        assert controller.rf_converter.settings.grid_cols == 5
 
     def test_controller_global_array_target(self, controller):
         """Target is built once at construction onto the global AtomArray."""
@@ -584,7 +589,7 @@ class TestAODSettings:
 
 class TestDataClasses:
     def test_rf_ramp_defaults(self):
-        ramp = RFRamp(channel=0, core=5, f_start=60e6, f_end=70e6, amplitude_pct=4.0)
+        ramp = RFRamp(channel=0, f_start=60e6, f_end=70e6, amplitude_pct=4.0)
         assert ramp.phase_deg == 0.0
         assert ramp.duration_s == 0.0
         assert ramp.tone_index == -1
@@ -606,8 +611,8 @@ class TestDataClasses:
 
     def test_awg_batch_construction(self):
         ramps = [
-            RFRamp(channel=0, core=i, f_start=60e6, f_end=60e6, amplitude_pct=4.0)
-            for i in range(10)
+            RFRamp(channel=0, f_start=60e6, f_end=60e6, amplitude_pct=4.0)
+            for _ in range(10)
         ]
         batch = AWGBatch(ramps=ramps, travel_duration_s=0.0)
         assert len(batch.ramps) == 10

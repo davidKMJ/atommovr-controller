@@ -1,11 +1,10 @@
-/*
- * awg_engine.cu -- facade over the two replay modes (see awg_engine.h).
+/* Author: Claude Code, David Ko
+ * Facade over the two replay modes (see awg_engine.h).
  *
  * Card setup, error handling and lifetime live here; the modes themselves are
  * stream.cuh (FIFO render-ahead) and sequence.cuh (precompute + card DRAM).
  * Phase maths is fixed point (phase.h), shared verbatim between the host-side
- * carry and the device kernel and unit-tested off-hardware against
- * awg_controller.scapp -- see `make test test-scapp`.
+ * carry and the device kernel; see `make test`.
  */
 
 #include "sequence.cuh"
@@ -15,17 +14,19 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <mutex>
 #include <thread>
 
 namespace {
 constexpr double kMaxSafeOutputV = 2.0;
 constexpr int kStartupTimeoutMs = 5000;
 constexpr int64_t kDefaultHoldTailSamples = 1 << 20;
+constexpr size_t kErrorCap = 512;
 } // namespace
 
 struct AWGEngine {
     drv_handle hCard = nullptr;
-    void* dma_buffer = nullptr;   /* STREAM: the ring. MEMORY: upload staging. */
+    void* dma_buffer = nullptr; /* STREAM: the ring. MEMORY: upload staging. */
 
     int32_t mode = AWG_ENGINE_MODE_STREAM;
     int32_t notify_samples = 0;
@@ -38,44 +39,62 @@ struct AWGEngine {
     int cuda_device_index = 0;
     cudaStream_t stream = nullptr;
 
-    AwgSchedule schedule{};             /* the round */
-    AwgDeviceSchedule dev_schedule{};
-    AwgSchedule tail{};                 /* MEMORY: the looping park segment */
-    AwgDeviceSchedule dev_tail{};
-    bool have_round = false;
+    AwgDeviceSchedule dev_schedule{}; /* STREAM: live. MEMORY: dropped after upload. */
+    int64_t total_samples = 0;
 
-    AwgStreamCtx sctx{};                /* STREAM only */
+    AwgStreamCtx sctx{}; /* STREAM only */
     std::thread pump_thread;
-    /* MEMORY has no pump to watch, so track playback here: uploading a new
-     * round writes over card memory the sequencer is actively replaying. */
     bool playing = false;
 
     std::mutex error_mutex;
-    char last_error[512] = {0};
+    char last_error[kErrorCap] = {0};
 };
 
 namespace {
 
+/* Errors are latched, not printed: the Python wrapper raises with the
+ * string, and C callers read awg_engine_last_error. Info/warn go to stderr
+ * with a tagged prefix. STREAM pump failures after the card has started
+ * print once from stream.cuh (play() has already returned). */
+char g_last_error[kErrorCap] = {0};
+std::mutex g_error_mutex;
+
 void set_error(AWGEngine* pc, const char* fmt, ...) {
-    if (pc == nullptr) {
-        return;
-    }
-    std::lock_guard<std::mutex> lock(pc->error_mutex);
+    char buf[kErrorCap];
     va_list args;
     va_start(args, fmt);
-    vsnprintf(pc->last_error, sizeof(pc->last_error), fmt, args);
+    vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
-    fprintf(stderr, "[awg_engine] %s\n", pc->last_error);
+    if (pc != nullptr) {
+        std::lock_guard<std::mutex> lock(pc->error_mutex);
+        snprintf(pc->last_error, sizeof(pc->last_error), "%s", buf);
+    }
+    std::lock_guard<std::mutex> lock(g_error_mutex);
+    snprintf(g_last_error, sizeof(g_last_error), "%s", buf);
+}
+
+void clear_error(AWGEngine* pc) {
+    if (pc != nullptr) {
+        std::lock_guard<std::mutex> lock(pc->error_mutex);
+        pc->last_error[0] = '\0';
+    }
+    std::lock_guard<std::mutex> lock(g_error_mutex);
+    g_last_error[0] = '\0';
+}
+
+void log_msg(const char* level, const char* fmt, ...) {
+    fprintf(stderr, "[awg_engine] %s: ", level);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fputc('\n', stderr);
 }
 
 bool check_spc(AWGEngine* pc, uint32_t dwErr, const char* what) {
     if (dwErr == ERR_OK) {
         return true;
     }
-    /* For a validation command (WRITESETUP) that fails because of an
-     * inconsistent combination of registers, `text` alone is usually the
-     * generic "the setup isn't valid" -- register/value name the actual
-     * offending register, which `text` does not. */
     uint32_t reg = 0;
     int32_t val = 0;
     char text[ERRORTEXTLEN] = {0};
@@ -92,9 +111,6 @@ bool check_cuda(AWGEngine* pc, cudaError_t err, const char* what) {
     return false;
 }
 
-/* spcm latches the last error until it is read back, so a failure from a
- * previous run is otherwise reported by the *next* M2CMD -- pointing at the
- * wrong call and the wrong run. */
 void clear_error_latch(AWGEngine* pc) {
     char stale[ERRORTEXTLEN] = {0};
     spcm_dwGetErrorInfo_i32(pc->hCard, nullptr, nullptr, stale);
@@ -125,11 +141,6 @@ bool configure_card(AWGEngine* pc, const AWGEngineConfig* cfg) {
         ok = ok && check_spc(pc,
                              spcm_dwSetParam_i32(pc->hCard, SPC_CARDMODE, SPC_REP_FIFO_SINGLE),
                              "SPC_CARDMODE(FIFO)");
-        /* SPC_LOOPS = 0 is "replay forever". Without it the card keeps
-         * whatever loop count it was left with, streams that much and STOPS
-         * -- which presents exactly like an underrun but is deterministic and
-         * independent of ring depth. Values from the vendor's own SCAPP
-         * example, scapp/cuda_rdma/rdma_fifo_kernel_DA. */
         ok = ok && check_spc(pc, spcm_dwSetParam_i64(pc->hCard, SPC_SEGMENTSIZE, 1024),
                              "SPC_SEGMENTSIZE");
         ok = ok && check_spc(pc, spcm_dwSetParam_i64(pc->hCard, SPC_LOOPS, 0), "SPC_LOOPS");
@@ -158,28 +169,20 @@ bool configure_card(AWGEngine* pc, const AWGEngineConfig* cfg) {
                              "SPC_AMP");
     }
 
-    /* Not every AO model has selectable termination -- some report "unknown
-     * register" for SPC_50OHM. That is a capability difference, not a
-     * failure. It matters electrically though: SPC_AMP is specified into
-     * 50 ohm, so a high-impedance input (a 1 Mohm scope, an unterminated
-     * amplifier) sees roughly TWICE the programmed voltage. */
     if (ok) {
         const int32_t load_50ohm = (cfg->output_load_ohms == 50.0) ? 1 : 0;
         if (spcm_dwSetParam_i32(pc->hCard, SPC_50OHM0, load_50ohm) != ERR_OK) {
             clear_error_latch(pc);
-            fprintf(stderr,
-                    "[awg_engine] note: no selectable output termination on this card; "
+            log_msg("warn",
+                    "no selectable output termination on this card; "
                     "SPC_AMP is into 50 ohm, so an unterminated load sees about 2x %.3f V. "
-                    "Terminate externally.\n",
+                    "Terminate externally.",
                     cfg->max_amplitude_v);
         } else {
             spcm_dwSetParam_i32(pc->hCard, SPC_50OHM1, load_50ohm);
         }
     }
 
-    /* NB: the driver's own `int64` (dlltyp.h), not `int64_t`. On LP64 Linux
-     * `int64_t` is `long` while the SDK's is `long long` -- same width,
-     * distinct types, so `int64_t*` will not bind to the out-parameter. */
     if (ok) {
         int64 max_rate = 0;
         spcm_dwGetParam_i64(pc->hCard, SPC_PCISAMPLERATE, &max_rate);
@@ -192,14 +195,6 @@ bool configure_card(AWGEngine* pc, const AWGEngineConfig* cfg) {
         spcm_dwGetParam_i64(pc->hCard, SPC_SAMPLERATE, &actual_rate);
         pc->sample_rate_hz = (double)actual_rate;
     }
-    /* MEMORY mode: SPC_REP_STD_SEQUENCE's WRITESETUP validates the step
-     * table along with everything else, and at this point no segment or
-     * step data exists yet -- upload_sequence() (called from load_round())
-     * writes that later, and issues WRITESETUP itself once it does. An
-     * empty table here reads back as the generic ERR_SETUP ("the setup
-     * isn't valid"), same as the vendor's own sequence example: it writes
-     * every segment and step before ever validating the setup. STREAM has
-     * no step table, so it validates fine right here. */
     if (ok && pc->mode == AWG_ENGINE_MODE_STREAM) {
         ok = check_spc(pc, spcm_dwSetParam_i32(pc->hCard, SPC_M2CMD, M2CMD_CARD_WRITESETUP),
                        "M2CMD_CARD_WRITESETUP");
@@ -213,9 +208,17 @@ bool configure_card(AWGEngine* pc, const AWGEngineConfig* cfg) {
 }
 
 /* MEMORY mode: render the round and its park segment and hand both to the
- * card. Called from load_round(), so this is where the cost lands. */
-int upload_sequence(AWGEngine* pc) {
-    const int64_t round_frames = awg_seq_align_up(pc->schedule.total_samples);
+ * card. */
+int upload_sequence(AWGEngine* pc, const AwgSchedule* round) {
+    AwgSchedule tail{};
+    AwgDeviceSchedule dev_tail{};
+    auto drop = [&] {
+        awg_schedule_free(&tail);
+        awg_device_schedule_free(&dev_tail);
+        awg_device_schedule_free(&pc->dev_schedule);
+    };
+
+    const int64_t round_frames = awg_seq_align_up(round->total_samples);
     if (round_frames > pc->dma_buffer_samples) {
         set_error(pc,
                   "round is %lld samples (%.3f ms) but the staging buffer holds %lld "
@@ -225,54 +228,55 @@ int upload_sequence(AWGEngine* pc) {
                   (long long)round_frames, round_frames / pc->sample_rate_hz * 1e3,
                   (long long)pc->dma_buffer_samples,
                   pc->dma_buffer_samples / pc->sample_rate_hz * 1e3);
+        drop();
         return -1;
     }
     if (pc->hold_tail_samples > pc->dma_buffer_samples) {
         set_error(pc, "hold_tail_samples (%lld) exceeds the staging buffer (%lld)",
                   (long long)pc->hold_tail_samples, (long long)pc->dma_buffer_samples);
+        drop();
         return -1;
     }
 
     char err[256] = {0};
-    awg_schedule_free(&pc->tail);
-    if (awg_schedule_hold_tail(&pc->tail, &pc->schedule, pc->schedule.total_samples,
-                               pc->hold_tail_samples, err, sizeof(err)) != 0) {
+    if (awg_schedule_hold_tail(&tail, round, round->total_samples, pc->hold_tail_samples, err,
+                               sizeof(err)) != 0) {
         set_error(pc, "%s", err);
+        drop();
         return -1;
     }
-
-    cudaError_t cerr = awg_device_schedule_upload(&pc->dev_tail, &pc->tail);
-    if (!check_cuda(pc, cerr, "tail schedule upload")) {
+    if (!check_cuda(pc, awg_device_schedule_upload(&dev_tail, &tail), "tail schedule upload")) {
+        drop();
         return -1;
     }
 
     clear_error_latch(pc);
+    cudaError_t cerr;
     uint32_t e = awg_seq_upload(pc->hCard, pc->dma_buffer, &pc->dev_schedule, 0,
                                 AWG_SEQ_SEG_ROUND, round_frames, (float)pc->max_value,
                                 pc->stream, &cerr);
     if (!check_cuda(pc, cerr, "render round") || !check_spc(pc, e, "upload round segment")) {
+        drop();
         return -1;
     }
-    e = awg_seq_upload(pc->hCard, pc->dma_buffer, &pc->dev_tail, 0, AWG_SEQ_SEG_HOLD,
+    e = awg_seq_upload(pc->hCard, pc->dma_buffer, &dev_tail, 0, AWG_SEQ_SEG_HOLD,
                        pc->hold_tail_samples, (float)pc->max_value, pc->stream, &cerr);
     if (!check_cuda(pc, cerr, "render park segment") ||
         !check_spc(pc, e, "upload park segment")) {
+        drop();
         return -1;
     }
-    if (!check_spc(pc, awg_seq_write_steps(pc->hCard), "SPC_SEQMODE_STEPMEM")) {
-        return -1;
-    }
-    /* Deferred from configure_card(): SPC_REP_STD_SEQUENCE's WRITESETUP
-     * validates the step table, which only exists now. */
-    if (!check_spc(pc, spcm_dwSetParam_i32(pc->hCard, SPC_M2CMD, M2CMD_CARD_WRITESETUP),
+    if (!check_spc(pc, awg_seq_write_steps(pc->hCard), "SPC_SEQMODE_STEPMEM") ||
+        !check_spc(pc, spcm_dwSetParam_i32(pc->hCard, SPC_M2CMD, M2CMD_CARD_WRITESETUP),
                    "M2CMD_CARD_WRITESETUP")) {
+        drop();
         return -1;
     }
 
-    fprintf(stderr,
-            "[awg_engine] uploaded %.3f ms round + %.3f ms looping park to card memory\n",
+    log_msg("info", "uploaded %.3f ms round + %.3f ms looping park to card memory",
             round_frames / pc->sample_rate_hz * 1e3,
             pc->hold_tail_samples / pc->sample_rate_hz * 1e3);
+    drop();
     return 0;
 }
 
@@ -280,25 +284,25 @@ int upload_sequence(AWGEngine* pc) {
 
 extern "C" AWGEngine* awg_engine_open(const AWGEngineConfig* cfg) {
     if (cfg == nullptr || cfg->card_path == nullptr) {
-        fprintf(stderr, "[awg_engine] open: cfg/card_path is NULL\n");
+        set_error(nullptr, "open: cfg/card_path is NULL");
         return nullptr;
     }
     if (cfg->max_amplitude_v > kMaxSafeOutputV) {
-        fprintf(stderr, "[awg_engine] max_amplitude_v=%.3f V exceeds the %.1f V ceiling\n",
-                cfg->max_amplitude_v, kMaxSafeOutputV);
+        set_error(nullptr, "max_amplitude_v=%.3f V exceeds the %.1f V ceiling",
+                  cfg->max_amplitude_v, kMaxSafeOutputV);
         return nullptr;
     }
     if (cfg->grid_rows <= 0 || cfg->grid_cols <= 0) {
-        fprintf(stderr, "[awg_engine] grid_rows/grid_cols must be positive\n");
+        set_error(nullptr, "grid_rows/grid_cols must be positive");
         return nullptr;
     }
     if (cfg->dma_buffer_samples <= 0 ||
         (cfg->mode == AWG_ENGINE_MODE_STREAM &&
          (cfg->notify_samples <= 0 || cfg->dma_buffer_samples % cfg->notify_samples != 0))) {
-        fprintf(stderr,
-                "[awg_engine] dma_buffer_samples must be positive, and in STREAM mode an "
-                "exact multiple of a positive notify_samples (got %lld / %d)\n",
-                (long long)cfg->dma_buffer_samples, cfg->notify_samples);
+        set_error(nullptr,
+                  "dma_buffer_samples must be positive, and in STREAM mode an "
+                  "exact multiple of a positive notify_samples (got %lld / %d)",
+                  (long long)cfg->dma_buffer_samples, cfg->notify_samples);
         return nullptr;
     }
 
@@ -315,9 +319,8 @@ extern "C" AWGEngine* awg_engine_open(const AWGEngineConfig* cfg) {
 
     pc->hCard = spcm_hOpen(const_cast<char*>(cfg->card_path));
     if (pc->hCard == nullptr) {
-        fprintf(stderr, "[awg_engine] spcm_hOpen('%s') returned NULL -- no card found\n",
-                cfg->card_path);
-        delete pc;
+        set_error(pc, "spcm_hOpen('%s') returned NULL -- no card found", cfg->card_path);
+        awg_engine_close(pc);
         return nullptr;
     }
 
@@ -327,14 +330,10 @@ extern "C" AWGEngine* awg_engine_open(const AWGEngineConfig* cfg) {
         const int64_t bytes = pc->dma_buffer_samples * 4;
         pc->dma_buffer = pvGetRDMABuffer(cfg->cuda_device_index, bytes);
         if (pc->dma_buffer == nullptr) {
-            /* Almost always BAR1, not free VRAM: the buffer is pinned for
-             * GPUDirect RDMA, so it must fit the aperture. Too large and the
-             * driver fails in the kernel with "ERROR in BuildSGList:
-             * nvidia_p2p_get_pages failed", which says nothing about size. */
             set_error(pc,
                       "pvGetRDMABuffer(%d, %lld bytes = %.0f MB) failed. This buffer is "
                       "pinned for GPUDirect RDMA and must fit the GPU's BAR1 aperture "
-                      "(nvidia-smi -q | grep -A3 'BAR1 Memory Usage'; a T1000 has 256 MB). "
+                      "(nvidia-smi -q | grep -A3 'BAR1 Memory Usage'). "
                       "Reduce AWGEngineConfig.dma_buffer_samples.",
                       cfg->cuda_device_index, (long long)bytes, bytes / 1e6);
             ok = false;
@@ -355,12 +354,10 @@ extern "C" AWGEngine* awg_engine_open(const AWGEngineConfig* cfg) {
     ok = ok && check_cuda(pc, cudaStreamCreate(&pc->stream), "cudaStreamCreate");
 
     if (!ok) {
-        if (pc->dma_buffer != nullptr) cudaFree(pc->dma_buffer);
-        if (pc->stream != nullptr) cudaStreamDestroy(pc->stream);
-        spcm_vClose(pc->hCard);
-        delete pc;
+        awg_engine_close(pc);
         return nullptr;
     }
+    clear_error(pc);
     return pc;
 }
 
@@ -380,10 +377,10 @@ extern "C" int64_t awg_engine_max_round_samples(const AWGEngine* pc) {
 }
 
 extern "C" double awg_engine_total_travel_duration_s(const AWGEngine* pc) {
-    if (pc == nullptr || !pc->have_round || pc->sample_rate_hz <= 0.0) {
+    if (pc == nullptr || pc->total_samples <= 0 || pc->sample_rate_hz <= 0.0) {
         return 0.0;
     }
-    return (double)pc->schedule.total_samples / pc->sample_rate_hz;
+    return (double)pc->total_samples / pc->sample_rate_hz;
 }
 
 extern "C" int awg_engine_load_round(AWGEngine* pc, const double* batch_travel_durations_s,
@@ -392,61 +389,62 @@ extern "C" int awg_engine_load_round(AWGEngine* pc, const double* batch_travel_d
                                      int32_t ramp_shape) {
     if (pc == nullptr || batch_travel_durations_s == nullptr || ramps == nullptr ||
         batch_ramp_counts == nullptr || n_batches <= 0) {
-        if (pc != nullptr) {
-            set_error(pc, "load_round: invalid arguments");
-        }
+        set_error(pc, "load_round: invalid arguments");
         return -1;
     }
-    if (pc->playing || pc->sctx.running.load(std::memory_order_relaxed)) {
+    if (pc->playing) {
         set_error(pc, "load_round called while play() is running -- stop() first");
         return -1;
     }
 
     char err[256] = {0};
-    AwgSchedule sch;
+    AwgSchedule sch{};
     if (awg_schedule_build(&sch, batch_travel_durations_s, n_batches, ramps, n_ramps,
                            batch_ramp_counts, pc->n_tones[0], pc->n_tones[1],
                            pc->sample_rate_hz, ramp_shape, err, sizeof(err)) != 0) {
         set_error(pc, "%s", err);
         return -1;
     }
-    if (sch.total_samples <= 0) {
+    const int64_t n = sch.total_samples;
+    if (n <= 0) {
         awg_schedule_free(&sch);
         set_error(pc, "round has zero total duration (every batch is a hold)");
         return -1;
     }
 
-    pc->have_round = false;
-    awg_schedule_free(&pc->schedule);
-    pc->schedule = sch;
-
-    if (!check_cuda(pc, awg_device_schedule_upload(&pc->dev_schedule, &pc->schedule),
+    pc->total_samples = 0;
+    if (!check_cuda(pc, awg_device_schedule_upload(&pc->dev_schedule, &sch),
                     "schedule upload")) {
-        awg_schedule_free(&pc->schedule);
+        awg_schedule_free(&sch);
         return -1;
     }
-    if (pc->mode == AWG_ENGINE_MODE_MEMORY && upload_sequence(pc) != 0) {
-        awg_schedule_free(&pc->schedule);
+    if (pc->mode == AWG_ENGINE_MODE_MEMORY && upload_sequence(pc, &sch) != 0) {
+        awg_schedule_free(&sch);
         return -1;
     }
+    awg_schedule_free(&sch);
 
-    pc->have_round = true;
+    pc->total_samples = n;
+    clear_error(pc);
     return 0;
 }
 
 extern "C" int awg_engine_play(AWGEngine* pc) {
     if (pc == nullptr) {
+        set_error(nullptr, "play called on NULL engine");
         return -1;
     }
-    if (!pc->have_round) {
+    if (pc->total_samples <= 0) {
         set_error(pc, "play called before a successful load_round()");
+        return -1;
+    }
+    if (pc->playing) {
+        set_error(pc, "play called while already running");
         return -1;
     }
     clear_error_latch(pc);
 
     if (pc->mode == AWG_ENGINE_MODE_MEMORY) {
-        /* Everything is already on the card; just trigger it. The sequence
-         * plays the round once and then loops the park segment forever. */
         if (!check_spc(pc,
                        spcm_dwSetParam_i32(pc->hCard, SPC_M2CMD,
                                            M2CMD_CARD_START | M2CMD_CARD_ENABLETRIGGER),
@@ -454,13 +452,10 @@ extern "C" int awg_engine_play(AWGEngine* pc) {
             return -1;
         }
         pc->playing = true;
+        clear_error(pc);
         return 0;
     }
 
-    if (pc->sctx.running.load(std::memory_order_relaxed)) {
-        set_error(pc, "play called while already running");
-        return -1;
-    }
     if (!check_spc(pc, spcm_dwSetParam_i32(pc->hCard, SPC_M2CMD, M2CMD_DATA_STARTDMA),
                    "M2CMD_DATA_STARTDMA")) {
         return -1;
@@ -478,12 +473,16 @@ extern "C" int awg_engine_play(AWGEngine* pc) {
     c->sched = &pc->dev_schedule;
     c->stream = pc->stream;
     c->stop_flag.store(false, std::memory_order_relaxed);
-    c->running.store(true, std::memory_order_relaxed);
     c->card_started = false;
     c->start_failed = false;
+    c->error_mutex = &pc->error_mutex;
+    c->last_error = pc->last_error;
+    c->last_error_len = sizeof(pc->last_error);
     c->failed = 0;
     c->err[0] = '\0';
+    clear_error(pc);
 
+    pc->playing = true;
     pc->pump_thread = std::thread(awg_stream_pump, c);
 
     std::unique_lock<std::mutex> lock(c->start_mutex);
@@ -493,29 +492,25 @@ extern "C" int awg_engine_play(AWGEngine* pc) {
     lock.unlock();
 
     if (!reached) {
-        set_error(pc, "pump did not reach the fill threshold within %d ms", kStartupTimeoutMs);
-    } else if (failed && c->failed) {
-        set_error(pc, "%s", c->err);
-    }
-    if (!reached || failed) {
         awg_engine_stop(pc);
+        set_error(pc, "pump did not reach the fill threshold within %d ms", kStartupTimeoutMs);
         return -1;
     }
-    return 0;
+    return failed ? awg_engine_stop(pc) : 0;
 }
 
 extern "C" const char* awg_engine_last_error(const AWGEngine* pc) {
     if (pc == nullptr) {
-        return "engine handle is NULL";
+        return g_last_error[0] != '\0' ? g_last_error : nullptr;
     }
     return pc->last_error[0] != '\0' ? pc->last_error : nullptr;
 }
 
-extern "C" void awg_engine_stop(AWGEngine* pc) {
+extern "C" int awg_engine_stop(AWGEngine* pc) {
     if (pc == nullptr) {
-        return;
+        set_error(nullptr, "stop called on NULL engine");
+        return -1;
     }
-    pc->playing = false;
     pc->sctx.stop_flag.store(true, std::memory_order_relaxed);
     if (pc->hCard != nullptr) {
         spcm_dwSetParam_i32(pc->hCard, SPC_M2CMD, M2CMD_DATA_STOPDMA | M2CMD_CARD_STOP);
@@ -523,10 +518,13 @@ extern "C" void awg_engine_stop(AWGEngine* pc) {
     if (pc->pump_thread.joinable()) {
         pc->pump_thread.join();
     }
-    pc->sctx.running.store(false, std::memory_order_relaxed);
-    if (pc->sctx.failed && pc->last_error[0] == '\0') {
-        set_error(pc, "%s", pc->sctx.err);
+    pc->playing = false;
+    if (!pc->sctx.failed) {
+        return 0;
     }
+    set_error(pc, "%s", pc->sctx.err[0] != '\0' ? pc->sctx.err : "STREAM pump failed");
+    pc->sctx.failed = 0;
+    return -1;
 }
 
 extern "C" void awg_engine_close(AWGEngine* pc) {
@@ -535,9 +533,6 @@ extern "C" void awg_engine_close(AWGEngine* pc) {
     }
     awg_engine_stop(pc);
     awg_device_schedule_free(&pc->dev_schedule);
-    awg_device_schedule_free(&pc->dev_tail);
-    awg_schedule_free(&pc->schedule);
-    awg_schedule_free(&pc->tail);
     if (pc->stream != nullptr) {
         cudaStreamDestroy(pc->stream);
     }

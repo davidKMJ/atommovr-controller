@@ -1,20 +1,4 @@
-/* MEMORY mode: precompute the round, upload it, let the card replay it.
- *
- * Why this mode exists: FIFO streaming needs sample_rate*4 B/s sustained over
- * PCIe forever, and an M4i's link is Gen2 x8 (~3.4 GB/s practical), so the
- * card cannot be fed at its own top speed. Uploading once and replaying from
- * the card's DRAM removes the sustained-rate requirement entirely, so MEMORY
- * mode runs at the full 1.25 GS/s. The cost is a bounded round length.
- *
- * Two sequence segments do all the work:
- *
- *   step 0 -> segment 0 (the round), played once, then falls through to
- *   step 1 -> segment 1 (the park), whose next-step pointer is itself, so the
- *             card loops it forever with no host involvement.
- *
- * The park segment must contain a whole number of cycles of every tone or
- * each wrap injects a phase step; awg_schedule_hold_tail() guarantees that.
- */
+/* MEMORY mode: precompute the round, upload it, let the card replay it. */
 
 #ifndef AWG_ENGINE_SEQUENCE_CUH
 #define AWG_ENGINE_SEQUENCE_CUH
@@ -30,10 +14,6 @@ enum {
     AWG_SEQ_SEG_ROUND = 0,
     AWG_SEQ_SEG_HOLD = 1,
     AWG_SEQ_N_SEGMENTS = 2,
-    /* Segment lengths must be a multiple of the card's memory granularity.
-     * 1024 clears the M4i requirement (32) and its minimum segment size with
-     * room to spare; the padding renders as more of the final hold, so it is
-     * waveform-correct rather than merely harmless. */
     AWG_SEQ_ALIGN = 1024,
 };
 
@@ -41,8 +21,6 @@ static inline int64_t awg_seq_align_up(int64_t n) {
     return ((n + AWG_SEQ_ALIGN - 1) / AWG_SEQ_ALIGN) * AWG_SEQ_ALIGN;
 }
 
-/* Sequence step word: low 32 bits are segment + next<<16, high 32 are the
- * loop count OR'd with the step flags. */
 static inline int64 awg_seq_step(int32_t segment, int32_t next, int32_t loops,
                                  uint32_t flags) {
     const uint32_t lo = ((uint32_t)next << 16) | (uint32_t)segment;
@@ -50,8 +28,6 @@ static inline int64 awg_seq_step(int32_t segment, int32_t next, int32_t loops,
     return (int64)(((uint64_t)hi << 32) | lo);
 }
 
-/* Render `frames` of `sched` into the RDMA staging buffer and hand it to the
- * card as sequence segment `index`. Blocking: one shot, then done. */
 static inline uint32_t awg_seq_upload(drv_handle hCard, void* staging,
                                       const AwgDeviceSchedule* sched, int64_t abs_start,
                                       int32_t index, int64_t frames, float max_value,

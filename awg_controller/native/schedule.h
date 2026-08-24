@@ -1,14 +1,7 @@
 /* Round -> segment schedule.
  *
  * Flattens a round into a table of AwgSegment with absolute start samples and
- * the phase carry already resolved. The carry is sequential but trivial (500
- * batches x 60 tones is 30k segments, ~2 MB, microseconds), and doing it up
- * front is what lets the GPU render an arbitrary span in a *single* launch.
- * That matters at the experiment scale: a 5 us batch is about one kernel
- * launch, so launch-per-batch rendering could never be real-time.
- *
- * Header-only and CUDA-free, so it unit-tests on a laptop against the Python
- * reference in awg_controller.scapp.
+ * the phase carry already resolved.
  */
 
 #ifndef AWG_ENGINE_SCHEDULE_H
@@ -39,8 +32,7 @@ AWG_HD inline int32_t awg_tone_slot(const AwgSchedule* sch, int32_t channel,
 
 /* Batch covering `abs_sample` given raw batch-start boundaries, clamped to the
  * last batch so that sampling past the end of the round keeps holding the
- * final state -- the indefinite park falls out of the same lookup rather than
- * being a special case. Takes raw arrays (not AwgSchedule) so the identical
+ * final state. Takes raw arrays (not AwgSchedule) so the identical
  * search can run against both the host AwgSchedule and the device-resident
  * AwgDeviceSchedule (render.cuh) from a single definition. */
 AWG_HD inline int32_t awg_batch_at(const int64_t* batch_start, int32_t n_batches,
@@ -135,7 +127,7 @@ static inline int awg_schedule_build(AwgSchedule* sch, const double* batch_trave
     }
 
     /* Pre-round resting state: each tone parked at the frequency the first
-     * batch names as its f_start, at zero phase. Mirrors the Python path. */
+     * batch names as its f_start, at zero phase. */
     for (int32_t r = 0; r < batch_ramp_counts[0]; ++r) {
         const AWGRoundRamp* rp = &ramps[r];
         const int32_t slot = awg_tone_slot(sch, rp->channel, rp->tone_index);
@@ -167,7 +159,7 @@ static inline int awg_schedule_build(AwgSchedule* sch, const double* batch_trave
                 return -1;
             }
             const int32_t slot = awg_tone_slot(sch, rp->channel, rp->tone_index);
-            /* dynamic phase only -- see AwgSegment::static_phase_q64 */
+            /* dynamic phase only */
             const uint64_t carry = awg_segment_phase_q64(&prev[slot], cursor);
 
             AwgSegment* seg = &sch->segments[(int64_t)b * total_tones + slot];
@@ -201,10 +193,6 @@ static inline int awg_schedule_build(AwgSchedule* sch, const double* batch_trave
  *   - tail_samples is a power of two, so a Q0.64 rate times it wraps cleanly;
  *   - each frequency is snapped to the nearest multiple of
  *     sample_rate/tail_samples.
- * At 1.25 GS/s with a 2^20 tail that grid is ~1.2 kHz, i.e. ~15 ppm on an
- * 80 MHz tone -- orders of magnitude below AOD pointing resolution.
- *
- * Phase carries exactly from the round, so the round->tail seam is clean too.
  */
 static inline int awg_schedule_hold_tail(AwgSchedule* tail, const AwgSchedule* round,
                                          int64_t at_sample, int64_t tail_samples, char* err,
@@ -235,7 +223,6 @@ static inline int awg_schedule_hold_tail(AwgSchedule* tail, const AwgSchedule* r
     const AwgSegment* last = &round->segments[(int64_t)(round->n_batches - 1) * n];
     for (int32_t slot = 0; slot < n; ++slot) {
         const AwgSegment* src = &last[slot];
-        /* a_end_q64 is f_end/fs in Q0.64; f_end < fs/2 so it never wrapped. */
         const double f_end = (double)src->a_end_q64 / AWG_Q64_SCALE * round->sample_rate_hz;
         const double grid = round->sample_rate_hz / (double)tail_samples;
         const double f_hold = floor(f_end / grid + 0.5) * grid;
