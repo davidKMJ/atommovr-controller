@@ -1,4 +1,4 @@
-## 1. NVIDIA driver (OS-dependent)
+## 1. Driver (OS-dependent)
 
 Install the proprietary NVIDIA driver matching the GPU and the CUDA/cupy version you intend to use
 

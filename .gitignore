@@ -7,6 +7,7 @@ __pycache__/
 
 # Build / test junk
 .pytest_cache/
+*.egg-info/
 
 # Editor junk
 .vscode/

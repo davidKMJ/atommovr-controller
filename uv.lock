@@ -25,7 +25,7 @@ members = [
 [[package]]
 name = "aod-atommovr"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "atommovr" },
     { name = "opencv-python-headless" },

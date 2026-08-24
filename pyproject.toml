@@ -1,7 +1,7 @@
 [project]
 name = "aod-atommovr"
 version = "0.1.0"
-description = "Add your description here"
+description = "Closed-loop AOD rearrangement: imaging, AWG control, and atommovr algorithms."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -11,6 +11,19 @@ dependencies = [
     "pillow>=12.3.0",
     "scikit-learn>=1.9.0",
     "seaborn>=0.13.2",
+]
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = [
+    "aod_atommovr",
+    "aod_atommovr.imaging",
+    "aod_atommovr.imaging.optimization",
+    "awg_controller",
+    "session_recorder",
 ]
 
 [tool.uv.workspace]
@@ -36,4 +49,4 @@ hardware = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["awg_controller/tests"]
+testpaths = ["awg_controller/tests", "aod_atommovr/tests", "session_recorder/tests"]
