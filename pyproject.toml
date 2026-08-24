@@ -1,5 +1,5 @@
 [project]
-name = "aod-atommovr"
+name = "atommovr-controller"
 version = "0.1.0"
 description = "Closed-loop AOD rearrangement: imaging, AWG control, and atommovr algorithms."
 readme = "README.md"
@@ -19,9 +19,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = [
-    "aod_atommovr",
-    "aod_atommovr.imaging",
-    "aod_atommovr.imaging.optimization",
+    "atommovr_controller",
+    "atommovr_controller.imaging",
     "awg_controller",
     "recorder",
 ]
@@ -49,4 +48,4 @@ hardware = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["awg_controller/tests", "aod_atommovr/tests", "recorder/tests"]
+testpaths = ["awg_controller/tests", "atommovr_controller/tests", "recorder/tests"]

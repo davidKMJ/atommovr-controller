@@ -6,7 +6,6 @@ This subpackage provides:
 - Blob-based centroid extraction and subpixel refinement
 - Multiple grid angle estimation techniques
 - Grid fitting from centroids
-- Lightweight visualization helpers
 
 Typical flow:
 1) Generate or load an image (numpy array or file path)
@@ -14,10 +13,10 @@ Typical flow:
 3) Estimate grid rotation (optional) and rectify
 4) Assign centroids to grid with fit_grid_and_assign
 
-See aod_atommovr/tests/test_imaging.py for examples.
+See atommovr_controller/tests/test_imaging.py for examples.
 """
 
-from aod_atommovr.imaging.generation import (
+from atommovr_controller.imaging.generation import (
     gaussian_2d,
     generate_gaussian_image,
     generate_gaussian_image_from_binary_grid,
@@ -29,9 +28,9 @@ from aod_atommovr.imaging.generation import (
     generate_gaussian_image_from_binary_grid_with_spacing,
 )
 
-from aod_atommovr.imaging.geometry import rotate_points_ccw, rotate_points_cw
+from atommovr_controller.imaging.geometry import rotate_points_ccw, rotate_points_cw
 
-from aod_atommovr.imaging.extraction import (
+from atommovr_controller.imaging.extraction import (
     Extractor,
     BlobDetection,
     fit_grid_and_assign,

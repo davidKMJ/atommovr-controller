@@ -3,8 +3,7 @@
 Renders binary occupancy grids (or explicit point lists) as noisy grayscale
 images: plant Gaussian spots at lattice sites, optionally rotate, pad onto a
 sensor-sized canvas, and add sensor noise/interference stripes. Consumed by
-``aod_atommovr.camera.GaussianCameraConfig`` and the imaging test/
-optimization suites.
+``atommovr_controller.camera.GaussianCameraConfig`` and the imaging test suite.
 """
 
 from __future__ import annotations
@@ -25,8 +24,7 @@ def compute_scaled_image_shape(
     """Ensure each lattice site has at least ``min_spacing_px`` separation.
 
     The default spacing of 24 pixels keeps the synthetic imagery within the
-    response range of the blob detector even for 100x100+ grids, which need a
-    higher pixel density than the legacy 12 px baseline."""
+    response range of the blob detector even for 100x100+ grids."""
     min_spacing_px = max(2.0, float(min_spacing_px))
     required_extent = int(math.ceil((grid_size + 1) * min_spacing_px))
     height = int(max(required_extent, int(image_shape[0])))

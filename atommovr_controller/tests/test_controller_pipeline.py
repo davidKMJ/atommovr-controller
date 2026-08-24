@@ -38,8 +38,8 @@ from awg_controller.awg_control import (
     RFConverter,
     RFRamp,
 )
-from aod_atommovr.camera import OfflineArrayCamera
-from aod_atommovr.controller import AodController, HardwareConfig, SoftwareConfig
+from atommovr_controller.camera import OfflineArrayCamera
+from atommovr_controller.controller import AtommovrController, HardwareConfig, SoftwareConfig
 
 # ---------------------------------------------------------------------------
 # Shared helpers (mirrors test_algorithms.py style)
@@ -490,7 +490,7 @@ class TestAlgorithmToRFPipeline:
 
 
 class TestControllerSimulation:
-    """Test the AodController in simulation mode (spcm unavailable)."""
+    """Test the AtommovrController in simulation mode (spcm unavailable)."""
 
     @pytest.fixture
     def controller(self):
@@ -502,7 +502,7 @@ class TestControllerSimulation:
             physical_params=PhysicalParams(middle_size=[4, 3]),
             aod_settings=_make_simple_settings(grid_rows=8, grid_cols=5),
         )
-        ctrl = AodController(sw, hw, camera=_default_camera(hw, sw))
+        ctrl = AtommovrController(sw, hw, camera=_default_camera(hw, sw))
         yield ctrl
         ctrl.shutdown()
 
@@ -528,7 +528,7 @@ class TestControllerSimulation:
             physical_params=PhysicalParams(middle_size=[4, 3]),
             aod_settings=_make_simple_settings(grid_rows=8, grid_cols=5),
         )
-        ctrl = AodController(sw, hw, camera=_default_camera(hw, sw))
+        ctrl = AtommovrController(sw, hw, camera=_default_camera(hw, sw))
         mask = (ctrl.array.target[:, :, 0] > 0).astype(int)
         assert mask.shape == (8, 5)
         assert np.array_equal(mask[0], np.ones(5, dtype=int))
@@ -536,14 +536,16 @@ class TestControllerSimulation:
         assert mask.sum() == 20
         ctrl.shutdown()
 
-    def test_controller_output_batch_simulation(self, controller):
-        """_output_batch in sim mode should not raise."""
+    def test_controller_play_round_simulation(self, controller):
+        """_play_round in sim mode should not raise, for a static
+        (zero-duration) round or a real one."""
         holding = controller.rf_converter.holding_config()
-        controller._output_batch(holding)  # should log, not crash
+        controller._play_round([holding])  # should log, not crash
 
-    def test_controller_send_holding(self, controller):
-        """_send_holding in sim mode should not raise."""
-        controller._send_holding()
+        move = controller.rf_converter.convert_moves(
+            [Move(from_row=0, from_col=0, to_row=1, to_col=1)]
+        )
+        controller._play_round([move])
 
     def test_controller_rf_converter_holding_matches_grid(self, controller):
         """Holding config ramps should match grid_rows + grid_cols."""
@@ -555,14 +557,198 @@ class TestControllerSimulation:
         """Whole-loop smoke test: instantiate, run a short session, shut down."""
         sw = SoftwareConfig(max_rounds=1)
         hw = HardwareConfig(aod_settings=AODSettings(grid_rows=4, grid_cols=3))
-        ctrl = AodController(sw, hw, camera=_default_camera(hw, sw))
+        ctrl = AtommovrController(sw, hw, camera=_default_camera(hw, sw))
         try:
-            holding = ctrl.rf_converter.holding_config()
-            ctrl._output_batch(holding)  # logs + sleeps 0s, must not raise
-            ctrl._send_holding()
             ctrl.run()
         finally:
             ctrl.shutdown()
+
+
+# =====================================================================
+# 4b. Controller <-> AWGEngine integration (duck-typed fake, no spcm/CUDA)
+# =====================================================================
+
+
+class _FakeAWGEngine:
+    """Duck-typed ``AWGEngine`` test double that models the real engine's
+    play/stop state machine (``awg_controller/native/awg_engine.cu``),
+    not just its call signatures:
+
+    - ``load_round`` raises if still playing ("load_round called while
+      play() is running -- stop() first", ``awg_engine_load_round``) and
+      if every batch is a hold, i.e. ``travel_duration_s <= 0`` ("round
+      has zero total duration (every batch is a hold)",
+      ``awg_schedule_build``'s ``total_samples`` never advances for a
+      zero-duration batch).
+    - ``play`` raises if already playing, and otherwise sets ``playing``.
+    - only ``stop`` clears ``playing``.
+
+    A controller that violates either invariant (e.g. assumes a live
+    handoff between rounds, or tries to preload a static holding round)
+    raises here exactly as it would on a real card, instead of only
+    silently doing the wrong thing.
+    """
+
+    def __init__(self, *, sample_rate_hz: float = 500e6, fail_on: str | None = None):
+        self.calls: list[tuple[str, object]] = []
+        self._sample_rate_hz = sample_rate_hz
+        self._fail_on = fail_on
+        self.closed = False
+        self.playing = False
+
+    def _maybe_fail(self, name: str) -> None:
+        if self._fail_on == name:
+            raise RuntimeError(f"synthetic failure in {name}")
+
+    def open(self) -> float:
+        self.calls.append(("open", None))
+        self._maybe_fail("open")
+        return self._sample_rate_hz
+
+    def load_round(self, batches) -> None:
+        batches = list(batches)
+        self.calls.append(("load_round", batches))
+        if self.playing:
+            raise RuntimeError(
+                "load_round called while play() is running -- stop() first"
+            )
+        if all(b.travel_duration_s <= 0 for b in batches):
+            raise RuntimeError("round has zero total duration (every batch is a hold)")
+        self._maybe_fail("load_round")
+
+    def play(self) -> None:
+        self.calls.append(("play", None))
+        if self.playing:
+            raise RuntimeError("play called while already running")
+        self._maybe_fail("play")
+        self.playing = True
+
+    def stop(self) -> None:
+        self.calls.append(("stop", None))
+        self._maybe_fail("stop")
+        self.playing = False
+
+    def close(self) -> None:
+        self.calls.append(("close", None))
+        self.closed = True
+
+
+class TestControllerHardwareEngine:
+    """Verify AtommovrController drives an attached AWGEngine correctly
+    against its actual state machine, not an idealized one: load_round()
+    rejects an all-static round and rejects running while still playing;
+    only stop() clears "playing", and stop() is a real RF gap
+    (M2CMD_CARD_STOP), not a software-only reset -- there is no live
+    handoff between rounds in either STREAM or MEMORY mode
+    (awg_controller/native/awg_engine.cu). _FakeAWGEngine enforces this
+    state machine itself, so a controller regression that assumes a
+    handoff or skips stop() fails these tests, not just a real card."""
+
+    def _build(self, *, engine, max_rounds=3):
+        sw = SoftwareConfig(algorithm_name="Hungarian", max_rounds=max_rounds)
+        hw = HardwareConfig(
+            physical_params=PhysicalParams(middle_size=[4, 3]),
+            aod_settings=_make_simple_settings(grid_rows=8, grid_cols=5),
+        )
+        return AtommovrController(sw, hw, camera=_default_camera(hw, sw), engine=engine)
+
+    def test_init_only_opens_the_card(self):
+        """No round is loaded at construction: a static holding round is
+        all-zero-duration, which load_round rejects outright, so there is
+        nothing valid to preload before the first round with real moves."""
+        engine = _FakeAWGEngine()
+        ctrl = self._build(engine=engine)
+        try:
+            assert [name for name, _ in engine.calls] == ["open"]
+        finally:
+            ctrl.shutdown()
+
+    def test_open_failure_is_not_swallowed(self):
+        engine = _FakeAWGEngine(fail_on="open")
+        sw = SoftwareConfig(algorithm_name="Hungarian")
+        hw = HardwareConfig(aod_settings=_make_simple_settings(grid_rows=8, grid_cols=5))
+        with pytest.raises(RuntimeError, match="synthetic failure in open"):
+            AtommovrController(sw, hw, camera=_default_camera(hw, sw), engine=engine)
+        assert engine.calls == [("open", None)]
+        assert not engine.closed
+
+    def test_hardware_round_cycle_is_stop_load_play(self):
+        """Every round must be stop() -> load_round() -> play(): stop()
+        is mandatory before load_round() (the native engine rejects
+        load_round while still playing), and there is no live handoff
+        between rounds in either STREAM or MEMORY mode. _FakeAWGEngine
+        raises on either violation, so ctrl.run() itself fails loudly if
+        the controller regresses to assuming a handoff that doesn't
+        exist."""
+        engine = _FakeAWGEngine()
+        ctrl = self._build(engine=engine, max_rounds=3)
+        try:
+            ctrl.run()
+        finally:
+            ctrl.shutdown()
+
+        names = [name for name, _ in engine.calls]
+        assert names[0] == "open"
+        body = names[1:-1]  # drop the leading open() and the trailing close()
+        assert len(body) > 0
+        assert len(body) % 3 == 0
+        for i in range(0, len(body), 3):
+            assert body[i : i + 3] == ["stop", "load_round", "play"]
+
+    def test_stop_called_before_every_load_round_including_first(self):
+        """stop() is documented as a safe no-op when nothing is playing,
+        so _play_round calls it unconditionally -- even before the very
+        first load_round, when the engine has only been open()-ed."""
+        engine = _FakeAWGEngine()
+        ctrl = self._build(engine=engine, max_rounds=3)
+        try:
+            ctrl.run()
+        finally:
+            ctrl.shutdown()
+
+        load_indices = [
+            i for i, (name, _) in enumerate(engine.calls) if name == "load_round"
+        ]
+        assert load_indices
+        for idx in load_indices:
+            assert engine.calls[idx - 1][0] == "stop"
+
+    def test_load_round_carries_the_whole_round_batch_list(self):
+        """A round's batches are loaded as a single load_round call, not
+        split one call per batch -- required for a phase-continuous
+        waveform, and because MEMORY mode renders/uploads the whole round
+        in that one call."""
+        engine = _FakeAWGEngine()
+        ctrl = self._build(engine=engine, max_rounds=1)
+        try:
+            ctrl.run()
+        finally:
+            ctrl.shutdown()
+
+        round_loads = [args for name, args in engine.calls if name == "load_round"]
+        assert round_loads
+        for batches in round_loads:
+            assert isinstance(batches, list)
+            assert len(batches) >= 1
+
+    def test_shutdown_closes_engine_and_is_idempotent(self):
+        engine = _FakeAWGEngine()
+        ctrl = self._build(engine=engine, max_rounds=0)
+        ctrl.shutdown()
+        assert engine.closed
+        ctrl.shutdown()  # must not raise on a second call
+
+    def test_context_manager_closes_engine_on_exception(self):
+        engine = _FakeAWGEngine()
+        sw = SoftwareConfig(algorithm_name="Hungarian", max_rounds=1)
+        hw = HardwareConfig(aod_settings=_make_simple_settings(grid_rows=8, grid_cols=5))
+
+        with pytest.raises(ValueError, match="boom"):
+            with AtommovrController(
+                sw, hw, camera=_default_camera(hw, sw), engine=engine
+            ):
+                raise ValueError("boom")
+        assert engine.closed
 
 
 # =====================================================================

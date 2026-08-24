@@ -1,8 +1,6 @@
-"""Round-hook bus for :class:`~aod_atommovr.controller.AodController`.
+"""Round-hook bus for :class:`~atommovr_controller.controller.AtommovrController`.
 
-The camera is the round's occupancy source of truth and is *not* a hook (it
-is a required collaborator passed as ``camera=``; see ``controller.py``).
-Everything else that wants to observe a session -- logging, recording,
+Everything that wants to observe a session -- logging, recording,
 metrics -- is a :class:`RoundHook`, fired by :class:`HookBus` with a
 read-only snapshot (:class:`RoundContext` / :class:`SessionContext`), never
 the live ``AtomArray``.
@@ -142,7 +140,7 @@ class HookBus:
             try:
                 fn(ctx)
             except Exception:
-                log.exception(f"Hook {hook!r}.{phase} raised; continuing.")
+                log.exception("Hook %r.%s raised; continuing.", hook, phase)
 
     def on_session_start(self, ctx: SessionContext) -> None:
         self._dispatch("on_session_start", ctx)

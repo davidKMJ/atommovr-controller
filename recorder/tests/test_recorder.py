@@ -1,5 +1,3 @@
-"""Tests for Recorder as a RoundHook."""
-
 from __future__ import annotations
 
 import json
@@ -11,9 +9,9 @@ from atommovr.utils.errormodels import ZeroNoise
 from atommovr.utils.Move import Move
 from atommovr.utils.core import PhysicalParams
 
-from aod_atommovr.camera import GaussianCameraConfig, OfflineArrayCamera
-from aod_atommovr.controller import AodController, HardwareConfig, SoftwareConfig
-from aod_atommovr.hooks import RoundContext, SessionContext
+from atommovr_controller.camera import GaussianCameraConfig, OfflineArrayCamera
+from atommovr_controller.controller import AtommovrController, HardwareConfig, SoftwareConfig
+from atommovr_controller.hooks import RoundContext, SessionContext
 from awg_controller.awg_control import AODSettings
 
 from recorder import Recorder, moves_to_records
@@ -145,7 +143,7 @@ class TestBusCallsRecorderNotController:
             ),
             aod_settings=AODSettings(grid_rows=rows, grid_cols=cols),
         )
-        with AodController(sw, hw, camera=cam, hooks=[rec]) as ctrl:
+        with AtommovrController(sw, hw, camera=cam, hooks=[rec]) as ctrl:
             assert not hasattr(ctrl, "recorder")
             ok = ctrl.run()
 

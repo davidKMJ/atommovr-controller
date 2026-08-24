@@ -1,30 +1,17 @@
 #!/usr/bin/env python3
 """
-atommovr Production Controller
-================================
-Orchestrates the complete atom-rearrangement feedback loop:
+Author: Claude Code, David Ko
+Closed-loop atom rearrangement: camera → algorithm → AWG RF.
 
-  1. Sync camera → occupancy (``Camera.sync``) — the camera is a required
-     collaborator, not a hook (see ``hooks.py``'s docstring for why).
-  2. ``hooks.before_round(ctx)`` — occupancy/frame already known.
-  3. Check whether target is already filled → done.
-  4. Compute rearrangement moves (configurable algorithm).
-  5. Convert moves to RF ramps (RFConverter / AWGBatch).
-  6. Write ramps to the Spectrum Instrumentation AWG card.
-  7. Offline: advance physics on the controller ``AtomArray``.
-  8. ``hooks.after_round(ctx)`` — always, including success/abort rounds.
-  9. Repeat from step 1.
-
-AWG generation onto a single card (multi-card support has been removed),
-under a 40 % total-amplitude-per-channel safety budget.
-
-Hardware backend note: the AWG real-time backend is being redesigned
-around precomputing an entire round's waveform and streaming it via SCAPP
-(see ``awg_controller.awg_engine.AWGEngine``); this controller isn't wired
-up to it yet, so hardware init below is always simulation mode for now --
-``_output_batch``/``_send_holding`` log what would have been sent and sleep
-for the nominal duration instead of touching a card. An ``engine=`` may be
-passed in and is stored, but is not (yet) driven by the loop.
+  1. Sync camera occupancy.
+  2. ``hooks.before_round(ctx)``.
+  3. Stop if the target is filled.
+  4. Compute moves.
+  5. Convert to RF ramps.
+  6. Play on the AWG (or simulate).
+  7. Offline: advance physics on ``AtomArray``.
+  8. ``hooks.after_round(ctx)``.
+  9. Repeat.
 """
 
 from __future__ import annotations
@@ -53,73 +40,59 @@ from atommovr.utils.core import Configurations, PhysicalParams
 from atommovr.utils.errormodels import ZeroNoise
 
 from awg_controller.awg_control import AODSettings, AWGBatch, RFConverter
-from awg_controller.awg_engine import AWGEngine
+from awg_controller.awg_engine import AWGEngine, CardConfig
 
-from aod_atommovr.camera import Camera, OfflineArrayCamera
-from aod_atommovr.hooks import HookBus, RoundContext, RoundHook, SessionContext
+from atommovr_controller.camera import Camera, OfflineArrayCamera
+from atommovr_controller.hooks import HookBus, RoundContext, RoundHook, SessionContext
 
-#  No real-time hardware backend is wired up yet (see module docstring) --
-#  always simulation mode.
-_HW_AVAILABLE = False
-
-#  logging
-#  Handler setup only happens when this file is run as the entry point (see
-#  `if __name__ == "__main__":` below) — importing this module as a library
-#  (tests, notebooks, other scripts) must not have the side effect of
-#  configuring the root logger or creating a log file.
+# Library modules never attach handlers. CLI / notebook call configure_logging().
 log = logging.getLogger(__name__)
 
+LOG_FORMAT = "%(asctime)s  %(levelname)-8s  %(message)s"
+LOG_FILE = "atommovr_controller.log"
 
-def _configure_logging() -> None:
+
+def configure_logging(*, filename: str = LOG_FILE) -> None:
+    """Configure the root logger once (stdout + ``filename``).
+
+    Safe to call from the CLI or the notebook. Importing this package
+    does not configure logging, so tests and other libraries stay quiet
+    until the caller sets handlers.
+    """
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s  %(levelname)-8s  %(message)s",
+        format=LOG_FORMAT,
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler("atommovr_controller.log"),
+            logging.FileHandler(filename),
         ],
     )
 
 
 @dataclass
 class HardwareConfig:
-    """Spectrum Instrumentation card + AOD/physical configuration (mirrors
-    cli.py defaults).
+    """Card, AOD, and physical settings."""
 
-    A single card is opened -- multi-card support has been removed (it only
-    ever broadcast identical commands to every card, with no real per-card
-    partitioning).
-    """
-
-    #: Device path, e.g. "/dev/spcm0"
+    #: e.g. "/dev/spcm0"
     card_path: str = "/dev/spcm0"
 
-    #: Output amplitude - manufacturer maximum is 1.6 V into 50 Ω. Hard
-    #: safety ceiling: must never exceed 2.0 V.
+    #: Manufacturer max is 1.6 V into 50 Ω; never exceed 2.0 V.
     max_amplitude_v: float = 1.6
 
-    #: Output impedance
     output_load_ohms: float = 50.0
-
-    #: AOD frequency-range and geometry.
     aod_settings: AODSettings = field(default_factory=AODSettings)
-
-    #: Physical parameters (AOD speed, site spacing, loading probability …).
     physical_params: PhysicalParams = field(default_factory=PhysicalParams)
 
 
 @dataclass
 class SoftwareConfig:
-    """Algorithm and imaging configuration."""
+    """Algorithm and imaging settings."""
 
-    #  Imaging
-    #: Optional OpenCV SimpleBlobDetector_Params (or legacy dict — ignored by Camera).
+    #: OpenCV blob-detector params (or a legacy dict — ignored by Camera).
     blob_params: Any = None
-
-    #: Error model applied on the controller-owned ``AtomArray`` (offline physics).
+    #: Applied to the controller-owned ``AtomArray`` (offline physics).
     error_model: Optional[ErrorModel] = None
 
-    #  Control loop
     max_rounds: int = 10
     algorithm_name: str = "PCFA"
     target_type: Configurations = Configurations.MIDDLE_FILL
@@ -137,27 +110,23 @@ _ALGORITHM_REGISTRY = {
 }
 
 
-class AodController:
-    """End-to-end atom rearrangement controller.
+class AtommovrController:
+    """Camera → algorithm → AWG rearrangement loop.
 
     Parameters
     ----------
     sw_config : SoftwareConfig
-        Algorithm, imaging, and control-loop settings.
+        Algorithm, imaging, and loop settings.
     hw_config : HardwareConfig
-        Spectrum Instrumentation card settings, plus the AOD frequency/
-        geometry (``aod_settings``) and physical parameters
-        (``physical_params``) that describe the hardware being driven.
+        Card, AOD geometry, and physical parameters.
     camera : Camera
-        Required collaborator (``OfflineArrayCamera`` or ``RealArrayCamera``)
-        -- the round's occupancy source of truth. Not a hook; see
-        ``hooks.py``'s docstring for why.
+        Occupancy source of truth each round (not a hook).
     engine : AWGEngine, optional
-        Accepted and stored for future wiring; the loop does not drive it
-        yet (see module docstring).
+        Opened at construction, closed on ``shutdown``. Default ``None``
+        simulates with log + ``time.sleep``.
     hooks : Sequence[RoundHook], optional
-        Observers fanned out to by a ``HookBus`` -- logging, recording,
-        metrics. Bare callables are treated as ``after_round``-only.
+        Observers (logging, recording, metrics). Bare callables run as
+        ``after_round`` only.
     """
 
     def __init__(
@@ -197,7 +166,6 @@ class AodController:
             error_model=err,
         )
 
-        self._grid_rotation: float = 0.0
         self._target_mask: Optional[np.ndarray] = None
         self._apply_target()
 
@@ -208,31 +176,58 @@ class AodController:
     # ------------------------------------------------------------------
 
     def _initialize_hardware(self) -> None:
-        """No real-time hardware backend is wired up yet (see module
-        docstring) -- always simulation mode."""
-        log.info("Simulation mode: no hardware backend wired up.")
+        """Open the card, or log and return in simulation mode.
 
-    def _output_batch(self, batch: AWGBatch) -> None:
-        """Send one ``AWGBatch`` to the card."""
-        log.info(
-            f"[SIM] batch: {len(batch.ramps)} ramps, "
-            f"duration={batch.travel_duration_s * 1e6:.1f} µs"
-        )
-        if batch.travel_duration_s > 0:
-            time.sleep(batch.travel_duration_s)
+        Does not preload a holding round: ``load_round`` rejects
+        zero-duration (all-static) batches.
+        """
+        if self.engine is None:
+            log.info("[SIM] no AWGEngine attached.")
+            return
 
-    def _send_holding(self) -> None:
-        """Restore static holding configuration (atoms held in place)."""
-        holding = self.rf_converter.holding_config()
-        log.info(f"[SIM] holding: {len(holding.ramps)} ramps")
+        sample_rate_hz = self.engine.open()
+        log.info("[HW] card opened: sample_rate=%.3f MS/s", sample_rate_hz / 1e6)
+
+    def _play_round(self, rf_batches: Sequence[AWGBatch]) -> float:
+        """Play one round as a single waveform, on hardware or simulated.
+        Returns the round's total travel duration (s).
+
+        Both modes treat the round the same way -- one unit, not one
+        call per batch: compute the round's total travel duration once,
+        then either drive the engine or just log, and sleep that total
+        either way so the loop stays paced to real move time before the
+        next ``camera.sync``.
+
+        Hardware: ``stop()`` (required before ``load_round`` -- leaves a
+        short RF gap, but keeps the previous tones parked until the last
+        possible moment), ``load_round`` the whole round, ``play()``.
+        """
+        total_s = sum(b.travel_duration_s for b in rf_batches)
+        if self.engine is None:
+            log.info(
+                "[SIM] round: %d batches, total travel=%.1f µs",
+                len(rf_batches),
+                total_s * 1e6,
+            )
+        else:
+            self.engine.stop()
+            self.engine.load_round(rf_batches)
+            self.engine.play()
+            log.info(
+                "[HW] round: %d batches, total travel=%.1f µs",
+                len(rf_batches),
+                total_s * 1e6,
+            )
+        if total_s > 0:
+            time.sleep(total_s)
+        return total_s
 
     # ------------------------------------------------------------------
     # Imaging / targets
     # ------------------------------------------------------------------
 
     def _build_target_mask(self, grid_shape: Tuple[int, int]) -> np.ndarray:
-        """Centred rectangular target from middle_size, falling back to
-        AODSettings.target_rows/target_cols."""
+        """Centred rectangular target from ``middle_size``, else AOD target size."""
         rows, cols = grid_shape
         ms = self.hw.physical_params.middle_size
         if ms is not None and len(ms) >= 2:
@@ -250,7 +245,7 @@ class AodController:
         return mask
 
     def _apply_target(self) -> np.ndarray:
-        """Build / cache target mask and copy it onto ``self.array.target``."""
+        """Cache the target mask onto ``self.array.target``."""
         if self._target_mask is None:
             ms = self.hw.physical_params.middle_size
             if ms is not None and len(ms) >= 2:
@@ -268,13 +263,7 @@ class AodController:
     # ------------------------------------------------------------------
 
     def run(self) -> bool:
-        """Execute the rearrangement feedback loop.
-
-        Returns
-        -------
-        bool
-            ``True`` if the target is successfully filled within ``max_rounds``.
-        """
+        """Run the loop. True if the target fills within ``max_rounds``."""
         cam = self.camera
         bus = self.hooks
 
@@ -286,25 +275,25 @@ class AodController:
         bus.on_session_start(session_ctx)
 
         log.info(
-            f"Loop start — algorithm={self.sw.algorithm_name}, "
-            f"grid={self.grid_shape[0]}×{self.grid_shape[1]}, "
-            f"max_rounds={self.sw.max_rounds}, camera={type(cam).__name__}"
+            "Loop start: algorithm=%s, grid=%d×%d, max_rounds=%d, camera=%s",
+            self.sw.algorithm_name,
+            self.grid_shape[0],
+            self.grid_shape[1],
+            self.sw.max_rounds,
+            type(cam).__name__,
         )
 
         try:
             for r in range(self.sw.max_rounds + 1):
                 t_loop = time.perf_counter()
 
-                # 1. Acquire + detect into the global array. The camera is
-                # the round's occupancy source of truth, not a hook -- its
-                # failures abort the round outright.
+                # Occupancy. Camera failure aborts the round.
                 try:
                     cam.sync(self.array)
                 except Exception as exc:
-                    log.error(f"Round {r}: acquisition failed - {exc}")
+                    log.error("Round %d: acquisition failed: %s", r, exc)
                     return False
 
-                self._grid_rotation = float(getattr(cam, "grid_rotation", 0.0) or 0.0)
                 state = (self.array.matrix[:, :, 0] > 0).astype(int)
                 target = self._apply_target()
 
@@ -323,17 +312,17 @@ class AodController:
                 )
                 bus.before_round(ctx)
 
-                # 2. Success?
                 if filled == need:
-                    log.info(f"SUCCESS - target filled after {r} round(s).")
+                    log.info("SUCCESS: target filled after %d round(s).", r)
                     ctx.success = True
                     bus.after_round(ctx)
                     return True
 
                 if r == self.sw.max_rounds:
                     log.warning(
-                        f"Max rounds ({self.sw.max_rounds}) reached; "
-                        f"{need - filled} target sites remain empty."
+                        "Max rounds (%d) reached; %d target sites remain empty.",
+                        self.sw.max_rounds,
+                        need - filled,
                     )
                     ctx.success = False
                     bus.after_round(ctx)
@@ -341,53 +330,57 @@ class AodController:
 
                 if atoms < need:
                     log.error(
-                        f"Round {r}: insufficient atoms "
-                        f"(have {atoms}, need {need}). Aborting."
+                        "Round %d: insufficient atoms (have %d, need %d). Aborting.",
+                        r,
+                        atoms,
+                        need,
                     )
                     ctx.aborted = "insufficient_atoms"
                     bus.after_round(ctx)
                     return False
 
-                # 3. Algorithm
                 try:
                     _, move_batches, algo_ok = self.algorithm.get_moves(self.array)
-                except Exception as exc:
-                    log.exception(f"Round {r}: algorithm raised - {exc}")
+                except Exception:
+                    log.exception("Round %d: algorithm raised.", r)
                     ctx.aborted = "algo_exception"
                     bus.after_round(ctx)
                     return False
 
                 if not algo_ok:
-                    log.error(f"Round {r}: algorithm reported failure.")
+                    log.error("Round %d: algorithm reported failure.", r)
                     ctx.aborted = "algo_fail"
                     bus.after_round(ctx)
                     return False
 
-                # 4. RF + hardware
                 rf_batches = self.rf_converter.convert_sequence(move_batches)
                 n_moves = sum(len(b) for b in move_batches)
                 log.info(
-                    f"Round {r}: {n_moves} moves → {len(rf_batches)} hardware batches."
+                    "Round %d: %d moves → %d hardware batches.",
+                    r,
+                    n_moves,
+                    len(rf_batches),
                 )
 
-                for batch in rf_batches:
-                    self._output_batch(batch)
-                self._send_holding()
+                try:
+                    total_travel_s = self._play_round(rf_batches)
+                except Exception:
+                    log.exception("Round %d: play failed.", r)
+                    ctx.aborted = "play_fail"
+                    bus.after_round(ctx)
+                    return False
 
-                # 5. Offline physics on the controller-owned array
                 if isinstance(cam, OfflineArrayCamera):
                     self.array.evaluate_moves(move_batches)
 
                 ctx.move_batches = move_batches
                 ctx.rf_batches = rf_batches
                 ctx.n_moves = n_moves
-                ctx.total_travel_duration_s = float(
-                    sum(b.travel_duration_s for b in rf_batches)
-                )
+                ctx.total_travel_duration_s = total_travel_s
                 bus.after_round(ctx)
 
                 elapsed_ms = (time.perf_counter() - t_loop) * 1e3
-                log.info(f"Round {r} done in {elapsed_ms:.1f} ms.")
+                log.info("Round %d done in %.1f ms.", r, elapsed_ms)
 
             return False
         finally:
@@ -398,7 +391,10 @@ class AodController:
     # ------------------------------------------------------------------
 
     def shutdown(self) -> None:
-        """Gracefully stop the card and release all resources."""
+        """Stop the card and release resources."""
+        if self.engine is not None:
+            self.engine.close()
+            log.info("[HW] card closed.")
         log.info("Controller shut down.")
 
     def __enter__(self):
@@ -436,7 +432,12 @@ def main() -> None:
         "--card",
         type=str,
         default="/dev/spcm0",
-        help="Card device path (single card; multi-card support removed)",
+        help="Card device path",
+    )
+    p.add_argument(
+        "--hardware",
+        action="store_true",
+        help="Drive a real AWGEngine instead of simulating.",
     )
     p.add_argument("--f-min-v", type=float, default=60e6, help="V-AOD f_min (Hz)")
     p.add_argument("--f-max-v", type=float, default=100e6, help="V-AOD f_max (Hz)")
@@ -470,7 +471,20 @@ def main() -> None:
         blob_params=sw.blob_params,
     )
 
-    with AodController(sw, hw, camera=camera) as ctrl:
+    engine = (
+        AWGEngine(
+            CardConfig(
+                card_path=hw.card_path,
+                max_amplitude_v=hw.max_amplitude_v,
+                output_load_ohms=hw.output_load_ohms,
+                aod_settings=hw.aod_settings,
+            )
+        )
+        if args.hardware
+        else None
+    )
+
+    with AtommovrController(sw, hw, camera=camera, engine=engine) as ctrl:
         try:
             success = ctrl.run()
             sys.exit(0 if success else 1)
@@ -480,5 +494,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    _configure_logging()
+    configure_logging()
     main()

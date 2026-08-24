@@ -18,12 +18,12 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "aod-atommovr",
+    "atommovr-controller",
     "atommovr",
 ]
 
 [[package]]
-name = "aod-atommovr"
+name = "atommovr-controller"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

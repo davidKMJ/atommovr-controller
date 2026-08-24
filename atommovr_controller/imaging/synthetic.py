@@ -2,25 +2,27 @@
 Synthetic imaging samples and scoring helpers.
 
 These utilities build rotated Gaussian tweezer-grid images with known ground
-truth and score extraction results against it. They are shared by the blob
-parameter optimizers in `aod_atommovr.imaging.optimization` and by the
+truth and score extraction results against it. They are shared by the
 imaging test suite, so they live in the package proper rather than in a test
 module.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
 
-from aod_atommovr.imaging.generation import (
+from atommovr_controller.imaging.generation import (
     compute_scaled_image_shape,
     generate_gaussian_image,
 )
-from aod_atommovr.imaging.geometry import rotate_points_ccw
+from atommovr_controller.imaging.geometry import rotate_points_ccw
+
+log = logging.getLogger(__name__)
 
 
 def setup_blob_params(
@@ -131,7 +133,9 @@ def generate_rot_img_in_memory(
         imageio.imwrite(f"{directory}/{suffix}_image.png", _to_uint8(gaussian_img))
         rot_path = f"{directory}/{suffix}_rot_image.png"
         imageio.imwrite(rot_path, _to_uint8(rot_image))
-        print(f"Saved images to {directory}/{suffix}_image.png and {rot_path}")
+        log.info(
+            "Saved images to %s/%s_image.png and %s", directory, suffix, rot_path
+        )
     return points, true_binary, rot_image, rot_path
 
 

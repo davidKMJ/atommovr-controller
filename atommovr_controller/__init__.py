@@ -2,27 +2,29 @@
 
 The atommovr connection -- wires ``atommovr`` algorithms and ``AtomArray``
 to a ``Camera`` and ``awg_controller.RFConverter`` through
-:class:`AodController`, with observers (logging, recording, metrics) fanned
-out by a :class:`~aod_atommovr.hooks.HookBus`.
+:class:`AtommovrController`, with observers (logging, recording, metrics) fanned
+out by a :class:`~atommovr_controller.hooks.HookBus`.
 """
 
-from aod_atommovr.camera import (
+from atommovr_controller.camera import (
     Camera,
     GaussianCameraConfig,
     OfflineArrayCamera,
     RealArrayCamera,
 )
-from aod_atommovr.controller import (
-    AodController,
+from atommovr_controller.controller import (
+    AtommovrController,
     HardwareConfig,
     SoftwareConfig,
+    configure_logging,
 )
-from aod_atommovr.hooks import Hook, HookBus, RoundContext, RoundHook, SessionContext
+from atommovr_controller.hooks import Hook, HookBus, RoundContext, RoundHook, SessionContext
 
 __all__ = [
-    "AodController",
+    "AtommovrController",
     "HardwareConfig",
     "SoftwareConfig",
+    "configure_logging",
     "Camera",
     "GaussianCameraConfig",
     "OfflineArrayCamera",

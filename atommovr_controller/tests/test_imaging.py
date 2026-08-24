@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from aod_atommovr.imaging.extraction import (
+from atommovr_controller.imaging.extraction import (
     BlobDetection,
     fit_grid_and_assign,
     inverse_rotate_centroids,
@@ -15,13 +15,13 @@ from aod_atommovr.imaging.extraction import (
     estimate_grid_rotation_fourier,
 )
 
-from aod_atommovr.imaging.generation import (
+from atommovr_controller.imaging.generation import (
     generate_gaussian_image_from_binary_grid,
     generate_gaussian_image,
     compute_scaled_image_shape,
 )
-from aod_atommovr.imaging.geometry import rotate_points_ccw
-from aod_atommovr.imaging.synthetic import (
+from atommovr_controller.imaging.geometry import rotate_points_ccw
+from atommovr_controller.imaging.synthetic import (
     angle_error_deg,
     compute_assignment_metrics,
     generate_rot_img,
@@ -49,14 +49,8 @@ logger = logging.getLogger(__name__)
 
 @pytest.fixture(name="logger")
 def logger():
-    """Provide a simple logger fixture for tests that request `logger`.
-
-    The original tests annotated the `logger` parameter with a `logging.Logger`
-    type but relied on a pytest fixture. Add `logger_fixture` and alias it to
-    the expected name via pytest's fixture mechanism below.
-    """
-    logging.basicConfig(level=logging.INFO)
-    return logging.getLogger("atommovr.tests.test_imaging")
+    """Module logger for tests that request `logger` (BlobDetection, etc.)."""
+    return logging.getLogger(__name__)
 
 
 def test_round_trip_small_grid(tmp_path):
@@ -90,12 +84,13 @@ def test_round_trip_small_grid(tmp_path):
     assert binary.shape == grid.shape
 
 
-def test_grid_extraction(logger: logging.Logger) -> None:
+def test_grid_extraction(logger: logging.Logger, tmp_path) -> None:
     logger.info("Starting grid extraction tests...")
 
     test_seeds = range(5, 10)
     grid_sizes = range(5, 10)
     image_shape = (1200, 1200)
+    out_dir = str(tmp_path)
 
     for seed, grid_size in zip(test_seeds, grid_sizes):
         np.random.seed(seed)
@@ -104,7 +99,7 @@ def test_grid_extraction(logger: logging.Logger) -> None:
             grid_size,
             true_angle=0,
             suffix="test",
-            directory="figs/imaging_test",
+            directory=out_dir,
         )
 
         # Set up blob detector params
@@ -120,7 +115,7 @@ def test_grid_extraction(logger: logging.Logger) -> None:
 
         # Extract and compare for BlobDetection
         binary_blob = extractor_blob.extract_estimate_rotate_and_assign(
-            "figs/imaging_test/test_image.png", visualize=False
+            os.path.join(out_dir, "test_image.png"), visualize=False
         )
 
         correct = np.array_equal(binary_blob, true_binary)
@@ -156,12 +151,13 @@ def generate_ideal_grid(
     return np.array(ideal_grid)
 
 
-def test_estimation_and_extraction(logger: logging.Logger) -> None:
+def test_estimation_and_extraction(logger: logging.Logger, tmp_path) -> None:
     logger.info("Starting extraction tests...")
 
     test_seeds = range(20, 21)
     grid_sizes = range(20, 21)
     image_shape = (640, 1280)
+    out_dir = str(tmp_path)
 
     # Define hyperparameter grid
     param_grid = {
@@ -200,7 +196,7 @@ def test_estimation_and_extraction(logger: logging.Logger) -> None:
             calib_grid_size,
             true_angle,
             suffix="calib",
-            directory="figs/imaging_test",
+            directory=out_dir,
         )
 
         # clashes with parameter grid
@@ -214,12 +210,12 @@ def test_estimation_and_extraction(logger: logging.Logger) -> None:
             blob_params=blob_params,
         )
         calib_centroids, _ = extractor_blob.extract(
-            "figs/imaging_test/calib_rot_image.png"
+            os.path.join(out_dir, "calib_rot_image.png")
         )
 
         # circle centroids in red on calibration image
         # Read the image with matplotlib, convert to uint8 BGR for OpenCV drawing
-        img_calib = plt.imread("figs/imaging_test/calib_rot_image.png")
+        img_calib = plt.imread(os.path.join(out_dir, "calib_rot_image.png"))
         # If the image is normalized float [0,1], convert to uint8
         if img_calib.dtype == np.float32 or img_calib.dtype == np.float64:
             img_disp = np.clip(img_calib * 255.0, 0, 255).astype(np.uint8)
@@ -243,38 +239,36 @@ def test_estimation_and_extraction(logger: logging.Logger) -> None:
             cv2.circle(img_bgr, center, radius=10, color=(0, 0, 255), thickness=2)
 
         # Save using OpenCV which preserves resolution; convert back to RGB for matplotlib-friendly files if desired
-        os.makedirs(
-            os.path.dirname("figs/imaging_test/centroids_on_calib.png"), exist_ok=True
-        )
-        cv2.imwrite("figs/imaging_test/centroids_on_calib.png", img_bgr)
+        os.makedirs(out_dir, exist_ok=True)
+        cv2.imwrite(os.path.join(out_dir, "centroids_on_calib.png"), img_bgr)
 
         # Estimate rotation angle
-        rotation_angle_diffs = estimate_grid_rotation_diffs(calib_centroids, plot=True)
+        rotation_angle_diffs = estimate_grid_rotation_diffs(calib_centroids, plot=False)
 
-        rotation_angle_pca = estimate_grid_rotation_pca(calib_centroids, plot=True)
+        rotation_angle_pca = estimate_grid_rotation_pca(calib_centroids, plot=False)
 
         rotation_angle_pair_diff = estimate_grid_rotation_pair_diff(
-            centroids=calib_centroids, plot=True
+            centroids=calib_centroids, plot=False
         )
 
         rotation_angle_diff_pca = estimate_grid_rotation_diff_pca(
-            calib_centroids, plot=True
+            calib_centroids, plot=False
         )
 
         rotation_angle_vectorize = estimate_grid_rotation_vectorize(
-            calib_centroids, (calib_grid_size, calib_grid_size), plot=True
+            calib_centroids, (calib_grid_size, calib_grid_size), plot=False
         )
 
         rotation_angle_fourier = estimate_grid_rotation_fourier(
-            calib_centroids, image_shape=image_shape, plot=True
+            calib_centroids, image_shape=image_shape, plot=False
         )
 
         rotation_angle_fourier_img = estimate_grid_rotation_fourier_img(
-            plt.imread("figs/imaging_test/calib_rot_image.png"), plot=True
+            plt.imread(os.path.join(out_dir, "calib_rot_image.png")), plot=False
         )
 
         rotation_angle_rect_fit = estimate_grid_rotation_fit_rect(
-            calib_centroids, plot=True
+            calib_centroids, plot=False
         )
 
         rotation_angle = rotation_angle_rect_fit  # np.deg2rad(true_angle)
@@ -291,7 +285,7 @@ def test_estimation_and_extraction(logger: logging.Logger) -> None:
             f"true angle {true_angle} degrees"
         )
 
-        img = plt.imread("figs/imaging_test/calib_rot_image.png")
+        img = plt.imread(os.path.join(out_dir, "calib_rot_image.png"))
 
         for param_set in param_combinations:
             logger.info(f"Testing blob params: {param_set}")
@@ -305,16 +299,16 @@ def test_estimation_and_extraction(logger: logging.Logger) -> None:
                     grid_size,
                     true_angle,
                     suffix="test",
-                    directory="figs/imaging_test",
+                    directory=out_dir,
                 )
 
                 # Read it back using matplotlib
-                img = plt.imread("figs/imaging_test/test_rot_image.png")
+                img = plt.imread(os.path.join(out_dir, "test_rot_image.png"))
 
                 img_back_rot = rotate_image(img, -rotation_angle)
 
                 # Save the corrected image
-                cor_rot_image_path = "figs/imaging_test/cor_rot_image.png"
+                cor_rot_image_path = os.path.join(out_dir, "cor_rot_image.png")
 
                 plt.imsave(cor_rot_image_path, img_back_rot, cmap="Blues")
 
@@ -331,7 +325,7 @@ def test_estimation_and_extraction(logger: logging.Logger) -> None:
 
                 # Extract and compare for BlobDetection on the rotated image
                 binary_blob = extractor_blob.extract_estimate_rotate_and_assign(
-                    cor_rot_image_path, visualize=True
+                    cor_rot_image_path, visualize=False
                 )
 
                 correct = np.array_equal(binary_blob, true_binary)
@@ -360,56 +354,107 @@ def test_estimation_and_extraction(logger: logging.Logger) -> None:
 
 
 def test_vectorize_fit(
-    logger: logging.Logger, angles: Optional[List[float]] = None, plot: bool = False
+    logger: logging.Logger,
+    tmp_path,
+    angles: Optional[List[float]] = None,
+    plot: bool = False,
 ) -> None:
     estimation_method_test(
-        logger, estimate_grid_rotation_vectorize, angles=angles, plot=plot
+        logger,
+        estimate_grid_rotation_vectorize,
+        angles=angles,
+        path=str(tmp_path),
+        plot=plot,
     )
 
 
 def test_pair_diff_fit(
-    logger: logging.Logger, angles: Optional[List[float]] = None, plot: bool = False
+    logger: logging.Logger,
+    tmp_path,
+    angles: Optional[List[float]] = None,
+    plot: bool = False,
 ) -> None:
     estimation_method_test(
-        logger, estimate_grid_rotation_pair_diff, angles=angles, plot=plot
+        logger,
+        estimate_grid_rotation_pair_diff,
+        angles=angles,
+        path=str(tmp_path),
+        plot=plot,
     )
 
 
 def test_diff_fit(
-    logger: logging.Logger, angles: Optional[List[float]] = None, plot: bool = False
+    logger: logging.Logger,
+    tmp_path,
+    angles: Optional[List[float]] = None,
+    plot: bool = False,
 ) -> None:
     estimation_method_test(
-        logger, estimate_grid_rotation_diffs, angles=angles, plot=plot
+        logger,
+        estimate_grid_rotation_diffs,
+        angles=angles,
+        path=str(tmp_path),
+        plot=plot,
     )
 
 
 def test_rect_fit(
-    logger: logging.Logger, angles: Optional[List[float]] = None, plot: bool = False
+    logger: logging.Logger,
+    tmp_path,
+    angles: Optional[List[float]] = None,
+    plot: bool = False,
 ) -> None:
     estimation_method_test(
-        logger, estimate_grid_rotation_fit_rect, angles=angles, plot=plot
+        logger,
+        estimate_grid_rotation_fit_rect,
+        angles=angles,
+        path=str(tmp_path),
+        plot=plot,
     )
 
 
 def test_fourier_estimation(
-    logger: logging.Logger, angles: Optional[List[float]] = None, plot: bool = False
+    logger: logging.Logger,
+    tmp_path,
+    angles: Optional[List[float]] = None,
+    plot: bool = False,
 ) -> None:
     estimation_method_test(
-        logger, estimate_grid_rotation_fourier, angles=angles, plot=plot
+        logger,
+        estimate_grid_rotation_fourier,
+        angles=angles,
+        path=str(tmp_path),
+        plot=plot,
     )
 
 
 def test_PCA_estimation(
-    logger: logging.Logger, angles: Optional[List[float]] = None, plot: bool = False
+    logger: logging.Logger,
+    tmp_path,
+    angles: Optional[List[float]] = None,
+    plot: bool = False,
 ) -> None:
-    estimation_method_test(logger, estimate_grid_rotation_pca, angles=angles, plot=plot)
+    estimation_method_test(
+        logger,
+        estimate_grid_rotation_pca,
+        angles=angles,
+        path=str(tmp_path),
+        plot=plot,
+    )
 
 
 def test_PCA_diff_estimation(
-    logger: logging.Logger, angles: Optional[List[float]] = None, plot: bool = False
+    logger: logging.Logger,
+    tmp_path,
+    angles: Optional[List[float]] = None,
+    plot: bool = False,
 ) -> None:
     estimation_method_test(
-        logger, estimate_grid_rotation_diff_pca, angles=angles, plot=plot
+        logger,
+        estimate_grid_rotation_diff_pca,
+        angles=angles,
+        path=str(tmp_path),
+        plot=plot,
     )
 
 
@@ -521,10 +566,11 @@ def estimation_method_test(
 
 def test_estimation_feasibility(
     logger: logging.Logger,
+    tmp_path,
     angles: Optional[List[float]] = None,
     grid_size: int = 9,
     image_shape: Tuple[int, int] = (400, 400),
-    output_csv: str = "data/benchmark_pipeline/feasibility_results_0812.csv",
+    output_csv: Optional[str] = None,
 ) -> None:
     """
     For each estimation method and angle, check whether the estimated
@@ -534,6 +580,10 @@ def test_estimation_feasibility(
     Saves a CSV with per-method/angle recall and a boolean `Feasible` flag.
     """
     logger.info("Starting feasibility tests for estimation methods...")
+
+    out_dir = str(tmp_path)
+    if output_csv is None:
+        output_csv = os.path.join(out_dir, "feasibility_results.csv")
 
     if angles is None:
         angles = [-10, -7, -5, -2, 0, 2, 5, 7, 10]
@@ -558,13 +608,13 @@ def test_estimation_feasibility(
             grid_size,
             true_angle=angle,
             suffix=f"feas_{int(angle)}",
-            directory="figs/imaging_test/feasability",
+            directory=out_dir,
         )
 
-        os.makedirs("figs/imaging_test/feasability", exist_ok=True)
+        os.makedirs(out_dir, exist_ok=True)
 
         # initial extraction on rotated image
-        rot_img_path = f"figs/imaging_test/feasability/feas_{int(angle)}_rot_image.png"
+        rot_img_path = os.path.join(out_dir, f"feas_{int(angle)}_rot_image.png")
         img = plt.imread(rot_img_path)
         if img.ndim == 3:
             img_gray = img[..., 0]
@@ -1523,16 +1573,15 @@ def benchmark_time_full_extraction_pipeline(
         logger.info(f"Wrote summary to {summary_csv}")
 
 
-def test_final_extraction_pipeline(logger):
+def test_final_extraction_pipeline(logger, tmp_path):
     """
     Test the full extraction pipeline on a single image with a moderate rotation.
-
-    Generates plots of each step for visual inspection.
     """
     angle = 15
     grid_size = 9
     image_shape = (640, 1280)
     suffix = "test_final"
+    out_dir = str(tmp_path)
     np.random.seed(42)
 
     _, true_binary = generate_rot_img(
@@ -1540,9 +1589,9 @@ def test_final_extraction_pipeline(logger):
         grid_size,
         true_angle=angle,
         suffix=suffix,
-        directory="figs/test_final",
+        directory=out_dir,
     )
-    rot_img_path = os.path.join("figs/test_final", f"{suffix}_rot_image.png")
+    rot_img_path = os.path.join(out_dir, f"{suffix}_rot_image.png")
     img = plt.imread(rot_img_path)
 
     blob_params = setup_blob_params(None)
@@ -1557,7 +1606,7 @@ def test_final_extraction_pipeline(logger):
     logger.info(f"Extracted {len(centroids)} centroids from rotated image.")
 
     # Estimate rotation using PCA and fit_rect (compare results)
-    est_angle_fit_rect = estimate_grid_rotation_fit_rect(centroids, plot=True)
+    est_angle_fit_rect = estimate_grid_rotation_fit_rect(centroids, plot=False)
     logger.info(f"Estimated angles: Fit Rect={est_angle_fit_rect:.2f}")
 
     # Inverse-rotate centroids using PCA estimate
@@ -1644,11 +1693,10 @@ def main():
     )
     args = parser.parse_args()
 
-    logging.basicConfig(
-        filename="test_imaging.log", encoding="utf-8", level=logging.INFO
-    )
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
+    from atommovr_controller import configure_logging
+
+    configure_logging(filename="test_imaging.log")
+    logger = logging.getLogger(__name__)
 
     logger.info("Starting main pipeline...")
 
@@ -1709,5 +1757,5 @@ def main():
         test_final_extraction_pipeline(logger)
 
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()

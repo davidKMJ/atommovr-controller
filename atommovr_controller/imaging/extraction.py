@@ -9,6 +9,7 @@ callers that don't need to pick a rotation method themselves.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Optional, Tuple
 
@@ -21,6 +22,8 @@ from PIL import Image
 from sklearn.cluster import KMeans
 
 from .geometry import rotate_points_ccw
+
+log = logging.getLogger(__name__)
 
 
 def _wrap_angle_deg(angle_deg: float) -> float:
@@ -104,7 +107,7 @@ def estimate_grid_rotation_pca(
     main_axis = axis
     mean = centroids.mean(axis=0)
     if plot:
-        os.makedirs("figs/estimation_tech/", exist_ok=True)
+        # os.makedirs("figs/estimation_tech/", exist_ok=True)
         sns.set_theme(style="whitegrid")
         fig, ax = plt.subplots(figsize=(6, 6))
         ax.scatter(centroids[:, 1], centroids[:, 0], alpha=0.6, s=20, color="#2b8cbe")
@@ -124,7 +127,7 @@ def estimate_grid_rotation_pca(
         ax.set_aspect("equal")
         ax.legend(loc="best", fontsize="small")
         plt.tight_layout()
-        plt.savefig("figs/estimation_tech/pca_direction.svg", bbox_inches="tight")
+        # plt.savefig("figs/estimation_tech/pca_direction.svg", bbox_inches="tight")
         plt.close()
     if return_diagnostics:
         diag = {
@@ -167,7 +170,7 @@ def estimate_grid_rotation_vectorize(
     angle_deg = np.degrees(angle)
     angle_deg = (angle_deg) % 180 - 90
     if plot:
-        os.makedirs("figs/estimation_tech/", exist_ok=True)
+        # os.makedirs("figs/estimation_tech/", exist_ok=True)
         sns.set_theme(style="whitegrid")
         fig, ax = plt.subplots(figsize=(6, 6))
         ax.scatter(centroids[:, 1], centroids[:, 0], alpha=0.6, s=20, color="#2b8cbe")
@@ -210,7 +213,7 @@ def estimate_grid_rotation_vectorize(
         ax.set_aspect("equal")
         ax.legend(loc="best", fontsize="small")
         plt.tight_layout()
-        plt.savefig("figs/estimation_tech/vectorize.svg", bbox_inches="tight")
+        # plt.savefig("figs/estimation_tech/vectorize.svg", bbox_inches="tight")
         plt.close()
     return angle_deg
 
@@ -269,7 +272,7 @@ def estimate_grid_rotation_diff_pca(centroids: np.ndarray, plot: bool = False) -
     angle_deg = (angle_deg + 90) % 180 - 90
     if plot:
         try:
-            os.makedirs("figs/estimation_tech/", exist_ok=True)
+            # os.makedirs("figs/estimation_tech/", exist_ok=True)
             sns.set_theme(style="whitegrid")
             fig, ax = plt.subplots(figsize=(6, 6))
             ax.scatter(
@@ -304,9 +307,9 @@ def estimate_grid_rotation_diff_pca(centroids: np.ndarray, plot: bool = False) -
             ax.set_aspect("equal")
             ax.legend(loc="best", fontsize="small")
             plt.tight_layout()
-            plt.savefig(
-                "figs/estimation_tech/pca_direction_diffs.svg", bbox_inches="tight"
-            )
+            # plt.savefig(
+            #     "figs/estimation_tech/pca_direction_diffs.svg", bbox_inches="tight"
+            # )
             plt.close()
         except Exception:
             pass
@@ -330,7 +333,7 @@ def estimate_grid_rotation_diffs(centroids: np.ndarray, plot: bool = False) -> f
     angle_deg = np.degrees(-angle_rad)
     angle_deg = (angle_deg) % 180 - 90
     if plot:
-        os.makedirs("figs/estimation_tech/", exist_ok=True)
+        # os.makedirs("figs/estimation_tech/", exist_ok=True)
         sns.set_theme(style="whitegrid")
         fig, ax = plt.subplots(figsize=(6, 6))
         sc = ax.scatter(
@@ -373,7 +376,7 @@ def estimate_grid_rotation_diffs(centroids: np.ndarray, plot: bool = False) -> f
         ax.set_title("KMeans on normalized pairwise differences")
         ax.legend(loc="upper right", fontsize="small")
         plt.tight_layout()
-        plt.savefig("figs/estimation_tech/kmeans_diffs.svg", bbox_inches="tight")
+        # plt.savefig("figs/estimation_tech/kmeans_diffs.svg", bbox_inches="tight")
         plt.close()
     return angle_deg
 
@@ -400,7 +403,7 @@ def estimate_grid_rotation_pair_diff(
     angle_rad = 0.5 * np.arctan2(mean_sin2, mean_cos2)
     angle_deg = -_wrap_angle_deg(np.degrees(angle_rad))
     if plot:
-        os.makedirs("figs/estimation_tech/", exist_ok=True)
+        # os.makedirs("figs/estimation_tech/", exist_ok=True)
         sns.set_theme(style="whitegrid")
         fig = plt.figure(figsize=(10, 4))
         ax1 = fig.add_subplot(1, 2, 1)
@@ -416,7 +419,7 @@ def estimate_grid_rotation_pair_diff(
         ax2.set_title("Pairwise angle histogram")
         ax2.legend(loc="best", fontsize="small")
         plt.tight_layout()
-        plt.savefig("figs/estimation_tech/pair_diff.svg", bbox_inches="tight")
+        # plt.savefig("figs/estimation_tech/pair_diff.svg", bbox_inches="tight")
         plt.close()
     return angle_deg
 
@@ -505,10 +508,10 @@ def estimate_grid_rotation_fit_rect(centroids: np.ndarray, plot: bool = False) -
         ax.add_patch(rect_patch)
         ax.set_aspect("equal")
         plt.tight_layout()
-        os.makedirs("figs/estimation_tech/", exist_ok=True)
-        plt.savefig(
-            "figs/estimation_tech/min_area_rect_steps.svg", dpi=120, bbox_inches="tight"
-        )
+        # os.makedirs("figs/estimation_tech/", exist_ok=True)
+        # plt.savefig(
+        #     "figs/estimation_tech/min_area_rect_steps.svg", dpi=120, bbox_inches="tight"
+        # )
         plt.close()
     return best["angle"]
 
@@ -535,7 +538,7 @@ def estimate_grid_rotation_fourier_img(img: np.ndarray, plot: bool = False) -> f
     angle_deg = np.degrees(angle_rad)
     angle_deg = (angle_deg + 90) % 180 - 90
     if plot:
-        os.makedirs("figs/estimation_tech/", exist_ok=True)
+        # os.makedirs("figs/estimation_tech/", exist_ok=True)
         sns.set_theme(style="whitegrid")
         fig, axs = plt.subplots(1, 3, figsize=(15, 5))
         axs[0].imshow(img, cmap="Blues")
@@ -548,9 +551,9 @@ def estimate_grid_rotation_fourier_img(img: np.ndarray, plot: bool = False) -> f
         axs[2].axvline(angle_deg, color="r", linestyle="--", label=f"{angle_deg:.2f}°")
         axs[2].legend(loc="best", fontsize="small")
         plt.tight_layout()
-        plt.savefig(
-            "figs/estimation_tech/fft_image_rotation.svg", dpi=200, bbox_inches="tight"
-        )
+        # plt.savefig(
+        #     "figs/estimation_tech/fft_image_rotation.svg", dpi=200, bbox_inches="tight"
+        # )
         plt.close()
     return angle_deg
 
@@ -576,7 +579,7 @@ def estimate_grid_rotation_fourier(
     angle_deg = np.degrees(angle_rad)
     angle_deg = (angle_deg + 90) % 180 - 90
     if plot:
-        os.makedirs("figs/estimation_tech/", exist_ok=True)
+        # os.makedirs("figs/estimation_tech/", exist_ok=True)
         sns.set_theme(style="whitegrid")
         fig, axs = plt.subplots(1, 3, figsize=(15, 5))
         axs[0].imshow(mask, cmap="Blues")
@@ -589,11 +592,11 @@ def estimate_grid_rotation_fourier(
         axs[2].axvline(angle_deg, color="b", linestyle="-.", label=f"{angle_deg:.2f}°")
         axs[2].legend(loc="best", fontsize="small")
         plt.tight_layout()
-        plt.savefig(
-            "figs/estimation_tech/fft_centroid_rotation.svg",
-            dpi=200,
-            bbox_inches="tight",
-        )
+        # plt.savefig(
+        #     "figs/estimation_tech/fft_centroid_rotation.svg",
+        #     dpi=200,
+        #     bbox_inches="tight",
+        # )
         plt.close()
     return angle_deg
 
@@ -638,7 +641,7 @@ class Extractor:
         self.threshold = threshold
         self.scale = scale
         self.affine_matrix = affine_matrix
-        self.logger = logger or _get_default_logger()
+        self.logger = logger if logger is not None else log
 
     def extract(self, image):
         raise NotImplementedError
@@ -745,12 +748,14 @@ class Extractor:
                 img = np.array(Image.open(image_path))
             else:
                 img = image
-            print(
-                f"Centroids shape: {np.array(centroids).shape}, centroids count: {len(centroids)}"
+            self.logger.info(
+                "Centroids shape: %s, centroids count: %d",
+                np.array(centroids).shape,
+                len(centroids),
             )
-            self.overlay_centroids(
-                img, centroids=centroids, save_path="figs/centroids_on_image.png"
-            )
+            # self.overlay_centroids(
+            #     img, centroids=centroids, save_path="figs/centroids_on_image.png"
+            # )
         if return_details:
             return binary, angle_deg, n_centroids
         return binary
@@ -863,7 +868,7 @@ class BlobDetection(Extractor):
         if len(keypoints) == 0:
             # return empty centroids rather than raising - upstream code can handle
             self.logger.warning(
-                "No blobs found by detector - returning empty centroids"
+                "No blobs found by detector: returning empty centroids"
             )
             return np.empty((0, 2), dtype=np.float32), img_gray.shape
 
@@ -903,17 +908,3 @@ class BlobDetection(Extractor):
 
         refined = np.column_stack((cy[valid], cx[valid]))
         return refined.astype(np.float32)
-
-
-def _get_default_logger():
-    import logging
-
-    logger = logging.getLogger("aod_atommovr.imaging")
-    if not logger.handlers:
-        logger.setLevel(logging.INFO)
-        ch = logging.StreamHandler()
-        ch.setLevel(logging.INFO)
-        formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-        ch.setFormatter(formatter)
-        logger.addHandler(ch)
-    return logger

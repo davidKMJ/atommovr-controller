@@ -1,17 +1,4 @@
-"""Camera interfaces for real and offline atom-array imaging.
-
-A ``Camera`` never owns an ``AtomArray`` — the controller holds the single
-authoritative array and passes it into ``sync()`` each round. ``sync()``
-reconciles the camera with that array; the direction of the reconciliation
-depends on the camera type (see each subclass's docstring).
-
-The camera is the round's occupancy source of truth and is a required
-controller collaborator, not a :class:`~aod_atommovr.hooks.RoundHook` — see
-that module's docstring for why (``OfflineArrayCamera.sync`` is
-bidirectional in a way a snapshot-only hook cannot be). ``sync()`` stashes
-its measured frame on ``self.last_frame`` so the controller can put it on
-the round context for hooks to read.
-"""
+"""Camera interfaces for real and offline atom-array imaging."""
 
 from __future__ import annotations
 
@@ -24,13 +11,13 @@ import numpy as np
 from atommovr.utils.AtomArray import AtomArray
 from atommovr.utils.core import PhysicalParams, random_loading
 
-from aod_atommovr.imaging.extraction import (
+from atommovr_controller.imaging.extraction import (
     BlobDetection,
     estimate_grid_rotation_fit_rect,
     fit_grid_and_assign,
     inverse_rotate_centroids,
 )
-from aod_atommovr.imaging.generation import (
+from atommovr_controller.imaging.generation import (
     compute_scaled_image_shape,
     generate_gaussian_image_from_binary_grid,
     generate_gaussian_image_from_binary_grid_with_spacing,
@@ -141,8 +128,7 @@ class GaussianCameraConfig:
     independent of ``image_shape`` — see
     ``generate_gaussian_image_from_binary_grid_with_spacing``. Either way,
     ``image_shape`` is the sensor frame the lattice gets centered onto, and
-    may be considerably larger than the atom-bearing region. Physical trap
-    spacing (µm/m) lives on ``PhysicalParams`` and is independent of both.
+    may be considerably larger than the atom-bearing region.
     """
 
     image_shape: Tuple[int, int] = (624, 816)

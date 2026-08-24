@@ -1,11 +1,9 @@
-"""Tests for the RoundHook / HookBus fan-out."""
-
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from aod_atommovr.hooks import Hook, HookBus, RoundContext, SessionContext
+from atommovr_controller.hooks import Hook, HookBus, RoundContext, SessionContext
 
 
 def _ctx(round_idx=0):

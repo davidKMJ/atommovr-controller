@@ -188,7 +188,7 @@ def _raise_native(what: str, handle: Optional[int] = None) -> None:
 class CardConfig:
     """Spectrum Instrumentation card + AOD settings that :class:`AWGEngine`
     opens the card with. Kept separate from any controller-level hardware
-    config so this module has no dependency on ``aod_atommovr``.
+    config so this module has no dependency on ``atommovr_controller``.
     """
 
     #: Device path, e.g. "/dev/spcm0"

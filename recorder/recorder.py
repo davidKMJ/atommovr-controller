@@ -1,6 +1,6 @@
 """Recorder: a simple ``RoundHook`` that writes ``meta.json`` at session
 start and appends one JSON line per round to ``rounds.jsonl``. Not part of
-the control loop -- attach via ``AodController(..., hooks=[Recorder(...)])``.
+the control loop -- attach via ``AtommovrController(..., hooks=[Recorder(...)])``.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
 
-from aod_atommovr.hooks import RoundContext, SessionContext
+from atommovr_controller.hooks import RoundContext, SessionContext
 
 log = logging.getLogger(__name__)
 

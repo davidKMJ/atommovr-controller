@@ -1,5 +1,3 @@
-"""Tests for offline/real camera occupancy reconciliation."""
-
 from __future__ import annotations
 
 import numpy as np
@@ -11,8 +9,8 @@ from atommovr.utils.errormodels import ZeroNoise
 
 from awg_controller.awg_control import AODSettings
 
-from aod_atommovr.camera import GaussianCameraConfig, OfflineArrayCamera, RealArrayCamera
-from aod_atommovr.controller import AodController, HardwareConfig, SoftwareConfig
+from atommovr_controller.camera import GaussianCameraConfig, OfflineArrayCamera, RealArrayCamera
+from atommovr_controller.controller import AtommovrController, HardwareConfig, SoftwareConfig
 
 
 class TestOfflineArrayCamera:
@@ -149,7 +147,7 @@ class TestOfflineArrayCamera:
             ),
             aod_settings=AODSettings(grid_rows=rows, grid_cols=cols),
         )
-        with AodController(sw, hw, camera=offline) as ctrl:
+        with AtommovrController(sw, hw, camera=offline) as ctrl:
             assert ctrl.camera is offline
             assert ctrl.grid_shape == (rows, cols)
             occ_snapshots = []
@@ -184,5 +182,5 @@ class TestOfflineArrayCamera:
             physical_params=PhysicalParams(middle_size=[2, 2]),
             aod_settings=AODSettings(grid_rows=4, grid_cols=4),
         )
-        with AodController(sw, hw, camera=offline) as ctrl:
+        with AtommovrController(sw, hw, camera=offline) as ctrl:
             assert ctrl.camera is offline
