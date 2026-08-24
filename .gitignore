@@ -1,0 +1,32 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Build / test junk
+.pytest_cache/
+
+# Editor junk
+.vscode/
+.DS_Store/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Recorder dumps
+runs/
+*.log
+
+# awg_controller/native build output
+awg_controller/native/*.o
+awg_controller/native/*.so
+awg_controller/native/tests/test_phase
+awg_controller/native/tests/test_schedule
+awg_controller/native/tests/bench_render
+awg_controller/native/tests/card_info
+
+# Claude Code
+.claude/
+CLAUDE.md
+
+# AWG card
+spcm4-3.15.24279/
