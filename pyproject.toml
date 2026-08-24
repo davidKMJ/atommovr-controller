@@ -1,0 +1,39 @@
+[project]
+name = "aod-atommovr"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "atommovr",
+    "opencv-python-headless>=5.0.0.93",
+    "pandas>=3.0.5",
+    "pillow>=12.3.0",
+    "scikit-learn>=1.9.0",
+    "seaborn>=0.13.2",
+]
+
+[tool.uv.workspace]
+members = [
+    "atommovr",
+]
+
+[tool.uv.sources]
+atommovr = { workspace = true, editable = true }
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+]
+
+[project.optional-dependencies]
+hardware = [
+  "spcm",
+  "cuda-python ; sys_platform == 'linux'",
+  "cupy-cuda12x[ctk] ; sys_platform == 'linux'",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["awg_controller/tests"]
