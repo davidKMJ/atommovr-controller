@@ -1,6 +1,9 @@
 # atommovr-controller
 
-## 0. Setup
+![Static Badge](https://img.shields.io/badge/status-in_progress-orange?style=for-the-badge)
+![Static Badge](https://img.shields.io/badge/type-research-purple?style=for-the-badge)
+
+## How to Start
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/). Then:
 
@@ -28,7 +31,7 @@ Open [`awg_controller.ipynb`](awg_controller.ipynb) (card / RF only) and [`atomm
 uv run pytest
 ```
 
-## 1. Packages
+## Packages
 
 The `atommovr/` submodule ([davidKMJ/atommovr](https://github.com/davidKMJ/atommovr)) is [bernienlab/atommovr](https://github.com/bernienlab/atommovr) with [SaBeBen/atommovr](https://github.com/SaBeBen/atommovr) merged in, plus timing edits. The main logic of `atommovr_controller/` and `awg_controller/` comes from that SaBeBen code, with significant feature additions and a refactor here.
 
@@ -51,7 +54,7 @@ CLI and the notebook both call `configure_logging()` (stdout + `atommovr_control
 
 **`recorder/`** — optional `RoundHook`: `meta.json` + one JSON line per round in `rounds.jsonl`. Attach with `AtommovrController(..., hooks=[Recorder(...)])`.
 
-## 2. Structure
+## Project Structure
 
 ```
 atommovr-controller/
