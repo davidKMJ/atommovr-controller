@@ -1,0 +1,33 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CudaCompile Include="..\common\spcm_cuda_common.cu" />
+    <CudaCompile Include="cuda_fifo_multi_blockaverage.cu" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\common\spcm_cuda_common.h">
+      <Filter>Header</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\common\ostools\spcm_ostools.h">
+      <Filter>Header</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\common\ostools\spcm_oswrap.h">
+      <Filter>Header</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\c_header\regs.h" />
+    <ClInclude Include="..\..\c_header\spcerr.h" />
+    <ClInclude Include="..\..\c_header\spcm_drv.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\common\ostools\spcm_ostools_win.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Header">
+      <UniqueIdentifier>{a0ffb403-4349-4484-91a6-f97f0b6243a0}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <Library Include="..\..\c_header\spcm_win32_msvcpp.lib" />
+    <Library Include="..\..\c_header\spcm_win64_msvcpp.lib" />
+  </ItemGroup>
+</Project>

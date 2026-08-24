@@ -1,0 +1,3 @@
+[submodule "atommovr"]
+	path = atommovr
+	url = https://github.com/davidKMJ/atommovr.git

@@ -1,0 +1,56 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Sources">
+      <UniqueIdentifier>{16a26f3d-4523-4bf3-94eb-1c634ea0afce}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Headers">
+      <UniqueIdentifier>{dd3399b7-630c-4aba-8a07-e46a54390d91}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Headers\c_header">
+      <UniqueIdentifier>{924d10c3-efc0-4f1c-86d6-6b745544f654}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\common\spcm_cuda_kernels.h">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\common\ostools\spcm_ostools.h">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\common\ostools\spcm_oswrap.h">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="..\common\spcm_cuda_common.h">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\c_header\dlltyp.h">
+      <Filter>Headers\c_header</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\c_header\regs.h">
+      <Filter>Headers\c_header</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\c_header\spcerr.h">
+      <Filter>Headers\c_header</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\c_header\spcm_drv.h">
+      <Filter>Headers\c_header</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <CudaCompile Include="cuda_fifo_fft.cu">
+      <Filter>Sources</Filter>
+    </CudaCompile>
+    <CudaCompile Include="..\common\spcm_cuda_common.cu">
+      <Filter>Sources</Filter>
+    </CudaCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\common\ostools\spcm_ostools_win.cpp">
+      <Filter>Sources</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Library Include="..\..\c_header\spcm_win64_msvcpp.lib" />
+  </ItemGroup>
+</Project>
