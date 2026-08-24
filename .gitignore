@@ -20,6 +20,10 @@ __pycache__/
 runs/
 *.log
 
+# Benchmark results
+data/
+figs/
+
 # awg_controller/native build output
 awg_controller/native/*.o
 awg_controller/native/*.so
