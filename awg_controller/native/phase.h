@@ -21,9 +21,20 @@
 #ifndef AWG_PI
 #define AWG_PI 3.14159265358979323846
 #endif
+#define AWG_PI_F ((float)AWG_PI)
 
 #define AWG_Q32_SCALE 4294967296.0            /* 2^32 */
 #define AWG_Q64_SCALE 18446744073709551616.0  /* 2^64 */
+
+#ifdef __CUDA_ARCH__
+#define AWG_SINF(x) __sinf(x)
+#define AWG_COSF(x) __cosf(x)
+#define AWG_EXPF(x) __expf(x)
+#else
+#define AWG_SINF(x) sinf(x)
+#define AWG_COSF(x) cosf(x)
+#define AWG_EXPF(x) expf(x)
+#endif
 
 typedef struct AwgSegment {
     int64_t start_sample;   /* absolute sample index where this segment begins */
@@ -87,14 +98,10 @@ AWG_HD inline uint64_t awg_segment_phase_q64(const AwgSegment* seg, int64_t abs_
     }
 
     if (seg->scurve_cyc != 0.0f) {
-        /* s-curve = mean-frequency tone minus a bounded sinusoidal deviation:
-         *   phi(t) = (f0+f1)/2 * t  -  (df*D/2pi) * sin(pi*t/D)
-         * The carrier is folded into a_q64 by the builder, leaving only the
-         * bounded term, which float carries comfortably. */
-        const double frac = (double)i / (double)seg->n_ramp;
-        double dev = -(double)seg->scurve_cyc * sin(AWG_PI * frac);
-        dev -= floor(dev); /* reduce to [0,1) before scaling to Q0.64 */
-        ph += (uint64_t)(dev * AWG_Q64_SCALE);
+        const float frac = (float)i / (float)seg->n_ramp;
+        float dev = -seg->scurve_cyc * AWG_SINF(AWG_PI_F * frac);
+        dev -= floorf(dev);
+        ph += (uint64_t)((double)dev * AWG_Q64_SCALE);
     }
 
     return ph;
@@ -175,25 +182,25 @@ AWG_HD inline float awg_segment_amplitude(const AwgSegment* seg, int64_t abs_sam
         i = 0;
     }
 
-    double f_hz;
+    float f_hz;
     if (seg->n_ramp <= 0 || i >= seg->n_ramp) {
         f_hz = seg->f_end_hz;
     } else if (seg->scurve_cyc != 0.0f) {
-        const double f_mid = 0.5 * ((double)seg->f_start_hz + (double)seg->f_end_hz);
-        const double df = (double)seg->f_end_hz - (double)seg->f_start_hz;
-        const double frac = (double)i / (double)seg->n_ramp;
-        f_hz = f_mid - 0.5 * df * cos(AWG_PI * frac);
+        const float f_mid = 0.5f * (seg->f_start_hz + seg->f_end_hz);
+        const float df = seg->f_end_hz - seg->f_start_hz;
+        const float frac = (float)i / (float)seg->n_ramp;
+        f_hz = f_mid - 0.5f * df * AWG_COSF(AWG_PI_F * frac);
     } else {
-        const double frac = (double)i / (double)seg->n_ramp;
-        f_hz = (double)seg->f_start_hz + ((double)seg->f_end_hz - (double)seg->f_start_hz) * frac;
+        const float frac = (float)i / (float)seg->n_ramp;
+        f_hz = seg->f_start_hz + (seg->f_end_hz - seg->f_start_hz) * frac;
     }
 
     if (seg->amp_mode == AWG_ENGINE_AMPLITUDE_LINEAR) {
-        return (float)((double)seg->amp_reference * ((double)seg->amp_a + (double)seg->amp_b * f_hz));
+        return seg->amp_reference * (seg->amp_a + seg->amp_b * f_hz);
     }
-    const double d = f_hz - (double)seg->amp_f0_hz;
-    const double e = exp(-(d * d) / (2.0 * (double)seg->amp_sigma_hz * (double)seg->amp_sigma_hz));
-    return (float)((double)seg->amp_reference * ((double)seg->amp_a - (double)seg->amp_b * e));
+    const float d = f_hz - seg->amp_f0_hz;
+    const float e = AWG_EXPF(-(d * d) / (2.0f * seg->amp_sigma_hz * seg->amp_sigma_hz));
+    return seg->amp_reference * (seg->amp_a - seg->amp_b * e);
 }
 
 #endif /* AWG_ENGINE_PHASE_H */
