@@ -7,6 +7,8 @@
 #ifndef AWG_ENGINE_PHASE_H
 #define AWG_ENGINE_PHASE_H
 
+#include "awg_engine.h"
+
 #include <math.h>
 #include <stdint.h>
 
@@ -48,7 +50,16 @@ typedef struct AwgSegment {
     uint64_t static_phase_q64;
 
     float scurve_cyc;       /* s-curve deviation amplitude in cycles; 0=linear  */
-    float amplitude;        /* DAC amplitude scale for this tone                */
+    float amplitude;        /* DAC amplitude scale for this tone (mode STATIC)  */
+
+    float f_start_hz;
+    float f_end_hz;
+    int32_t amp_mode;       /* AWG_ENGINE_AMPLITUDE_*                           */
+    float amp_a;
+    float amp_b;
+    float amp_f0_hz;
+    float amp_sigma_hz;
+    float amp_reference;    /* amplitude_reference_pct / 100                    */
 } AwgSegment;
 
 /* Phase (cycles, Q0.64) of `seg` at absolute sample `abs_sample`.
@@ -106,12 +117,21 @@ AWG_HD inline float awg_phase_cycles(uint64_t phase_q64) {
 AWG_HD inline void awg_segment_build(AwgSegment* seg, double f_start_hz, double f_end_hz,
                                      double duration_s, int is_scurve, double sample_rate_hz,
                                      int64_t start_sample, uint64_t phase0_q64,
-                                     float amplitude) {
+                                     float amplitude, int32_t amp_mode, float amp_a, float amp_b,
+                                     float amp_f0_hz, float amp_sigma_hz, float amp_reference) {
     seg->start_sample = start_sample;
     seg->phase0_q64 = phase0_q64;
     seg->amplitude = amplitude;
     seg->b_half_q64 = 0;
     seg->scurve_cyc = 0.0f;
+    seg->f_start_hz = (float)f_start_hz;
+    seg->f_end_hz = (float)f_end_hz;
+    seg->amp_mode = amp_mode;
+    seg->amp_a = amp_a;
+    seg->amp_b = amp_b;
+    seg->amp_f0_hz = amp_f0_hz;
+    seg->amp_sigma_hz = amp_sigma_hz;
+    seg->amp_reference = amp_reference;
 
     const int64_t n_ramp =
         (duration_s > 0.0) ? (int64_t)(duration_s * sample_rate_hz + 0.5) : 0;
@@ -140,6 +160,40 @@ AWG_HD inline void awg_segment_build(AwgSegment* seg, double f_start_hz, double 
         pe += seg->b_half_q64 * (uint64_t)n_ramp * (uint64_t)n_ramp;
     }
     seg->phase_end_q64 = pe;
+}
+
+/* Instantaneous per-sample amplitude. STATIC returns the fixed value; LINEAR
+ * and GAUSSIAN evaluate the ratio at the ramp's instantaneous frequency, so
+ * amplitude tracks the sweep the same way phase does. */
+AWG_HD inline float awg_segment_amplitude(const AwgSegment* seg, int64_t abs_sample) {
+    if (seg->amp_mode == AWG_ENGINE_AMPLITUDE_STATIC) {
+        return seg->amplitude;
+    }
+
+    int64_t i = abs_sample - seg->start_sample;
+    if (i < 0) {
+        i = 0;
+    }
+
+    double f_hz;
+    if (seg->n_ramp <= 0 || i >= seg->n_ramp) {
+        f_hz = seg->f_end_hz;
+    } else if (seg->scurve_cyc != 0.0f) {
+        const double f_mid = 0.5 * ((double)seg->f_start_hz + (double)seg->f_end_hz);
+        const double df = (double)seg->f_end_hz - (double)seg->f_start_hz;
+        const double frac = (double)i / (double)seg->n_ramp;
+        f_hz = f_mid - 0.5 * df * cos(AWG_PI * frac);
+    } else {
+        const double frac = (double)i / (double)seg->n_ramp;
+        f_hz = (double)seg->f_start_hz + ((double)seg->f_end_hz - (double)seg->f_start_hz) * frac;
+    }
+
+    if (seg->amp_mode == AWG_ENGINE_AMPLITUDE_LINEAR) {
+        return (float)((double)seg->amp_reference * ((double)seg->amp_a + (double)seg->amp_b * f_hz));
+    }
+    const double d = f_hz - (double)seg->amp_f0_hz;
+    const double e = exp(-(d * d) / (2.0 * (double)seg->amp_sigma_hz * (double)seg->amp_sigma_hz));
+    return (float)((double)seg->amp_reference * ((double)seg->amp_a - (double)seg->amp_b * e));
 }
 
 #endif /* AWG_ENGINE_PHASE_H */

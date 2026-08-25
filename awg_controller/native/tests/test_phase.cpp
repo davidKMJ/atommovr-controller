@@ -37,7 +37,8 @@ static int check(const char* label, double f0, double f1, double D, int is_scurv
                  double fs, double t_end, int n_probe, double tol_rad) {
     AwgSegment seg;
     awg_segment_build(&seg, f0, f1, D, is_scurve, fs, /*start_sample=*/0,
-                      /*phase0_q64=*/0ull, /*amplitude=*/1.0f);
+                      /*phase0_q64=*/0ull, /*amplitude=*/1.0f, AWG_ENGINE_AMPLITUDE_STATIC, 0.0f,
+                      0.0f, 0.0f, 0.0f, 0.0f);
 
     double worst = 0.0;
     for (int k = 0; k < n_probe; ++k) {
@@ -62,7 +63,8 @@ static int check(const char* label, double f0, double f1, double D, int is_scurv
 static int check_freq(const char* label, double f0, double f1, double D, double fs,
                       double tol_hz) {
     AwgSegment seg;
-    awg_segment_build(&seg, f0, f1, D, 0, fs, 0, 0ull, 1.0f);
+    awg_segment_build(&seg, f0, f1, D, 0, fs, 0, 0ull, 1.0f, AWG_ENGINE_AMPLITUDE_STATIC, 0.0f,
+                      0.0f, 0.0f, 0.0f, 0.0f);
 
     double worst = 0.0;
     const int64_t n = (int64_t)(D * fs);
@@ -80,6 +82,36 @@ static int check_freq(const char* label, double f0, double f1, double D, double 
     const bool ok = worst <= tol_hz;
     printf("  %-34s worst=%9.3e Hz  (%.1e relative)  %s\n", label, worst, worst / f1,
            ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+/* Amplitude must track the ramp's instantaneous frequency, not just its
+ * endpoints. */
+static int check_amplitude(const char* label, int mode, double f0, double f1, double D,
+                           int is_scurve, double fs, double a, double b, double f0_hz,
+                           double sigma_hz, double reference_pct, double tol) {
+    AwgSegment seg;
+    awg_segment_build(&seg, f0, f1, D, is_scurve, fs, 0, 0ull, 0.0f, mode, (float)a, (float)b,
+                      (float)f0_hz, (float)sigma_hz, (float)(reference_pct / 100.0));
+
+    const int64_t n = (int64_t)(D * fs);
+    double worst = 0.0;
+    for (int k = 0; k <= 100; ++k) {
+        const int64_t i = (n * k) / 100;
+        const double frac = (double)i / (double)n;
+        const double f_hz = is_scurve
+            ? 0.5 * (f0 + f1) - 0.5 * (f1 - f0) * cos(AWG_PI * frac)
+            : f0 + (f1 - f0) * frac;
+        const double ratio = (mode == AWG_ENGINE_AMPLITUDE_LINEAR)
+            ? a + b * f_hz
+            : a - b * exp(-((f_hz - f0_hz) * (f_hz - f0_hz)) / (2.0 * sigma_hz * sigma_hz));
+        const double want = reference_pct / 100.0 * ratio;
+        const double got = awg_segment_amplitude(&seg, i);
+        const double e = fabs(got - want);
+        if (e > worst) worst = e;
+    }
+    const bool ok = worst <= tol;
+    printf("  %-34s worst=%9.3e  %s\n", label, worst, ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }
 
@@ -103,6 +135,16 @@ int main(void) {
     printf("\n indefinite hold:\n");
     bad += check("hold 100 MHz, 10 s", 100e6, 100e6, 0.0, 0, fs, 10.0, 20000, 1e-4);
     bad += check("hold 100 MHz, 60 s", 100e6, 100e6, 0.0, 0, fs, 60.0, 20000, 1e-4);
+
+    printf("\n amplitude follows the ramp:\n");
+    bad += check_amplitude("linear comp, linear ramp", AWG_ENGINE_AMPLITUDE_LINEAR, 80e6, 89e6,
+                           5e-6, 0, fs, 0.5, 2e-9, 0.0, 0.0, 40.0, 1e-6);
+    bad += check_amplitude("linear comp, scurve ramp", AWG_ENGINE_AMPLITUDE_LINEAR, 80e6, 89e6,
+                           5e-6, 1, fs, 0.5, 2e-9, 0.0, 0.0, 40.0, 1e-6);
+    bad += check_amplitude("gaussian comp, linear ramp", AWG_ENGINE_AMPLITUDE_GAUSSIAN, 80e6, 89e6,
+                           5e-6, 0, fs, 1.2, 0.6, 100e6, 15e6, 40.0, 1e-6);
+    bad += check_amplitude("gaussian comp, scurve ramp", AWG_ENGINE_AMPLITUDE_GAUSSIAN, 80e6, 89e6,
+                           5e-6, 1, fs, 1.2, 0.6, 100e6, 15e6, 40.0, 1e-6);
 
     printf("\n%s\n", bad ? "FAILURES PRESENT" : "all phase checks passed");
     return bad ? 1 : 0;

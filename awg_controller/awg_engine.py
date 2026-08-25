@@ -81,6 +81,12 @@ class _AWGRoundRamp(ctypes.Structure):
         ("f_end_hz", ctypes.c_double),
         ("amplitude_pct", ctypes.c_double),
         ("phase_deg", ctypes.c_double),
+        ("amplitude_comp_mode", ctypes.c_int32),
+        ("amplitude_comp_a", ctypes.c_double),
+        ("amplitude_comp_b", ctypes.c_double),
+        ("amplitude_comp_f0_hz", ctypes.c_double),
+        ("amplitude_comp_sigma_hz", ctypes.c_double),
+        ("amplitude_reference_pct", ctypes.c_double),
     ]
 
 
@@ -354,6 +360,12 @@ class AWGEngine:
                     f_end_hz=ramp.f_end,
                     amplitude_pct=ramp.amplitude_pct,
                     phase_deg=ramp.phase_deg,
+                    amplitude_comp_mode=ramp.amplitude_comp_mode,
+                    amplitude_comp_a=ramp.amplitude_comp_a,
+                    amplitude_comp_b=ramp.amplitude_comp_b,
+                    amplitude_comp_f0_hz=ramp.amplitude_comp_f0_hz,
+                    amplitude_comp_sigma_hz=ramp.amplitude_comp_sigma_hz,
+                    amplitude_reference_pct=ramp.amplitude_reference_pct,
                 )
                 i += 1
 

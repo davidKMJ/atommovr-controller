@@ -40,6 +40,16 @@ enum {
     AWG_ENGINE_SHAPE_SCURVE = 1,
 };
 
+/* Per-tone amplitude vs. frequency response. STATIC: amplitude_pct held
+ * constant across the ramp. LINEAR/GAUSSIAN: amplitude tracks the
+ * instantaneous ramp frequency through amplitude_reference_pct * ratio(f),
+ * ratio(f) = a + b*f (LINEAR) or a - b*exp(-(f-f0)^2/(2*sigma^2)) (GAUSSIAN). */
+enum {
+    AWG_ENGINE_AMPLITUDE_STATIC = 0,
+    AWG_ENGINE_AMPLITUDE_LINEAR = 1,
+    AWG_ENGINE_AMPLITUDE_GAUSSIAN = 2,
+};
+
 typedef struct {
     const char* card_path;
     double max_amplitude_v;
@@ -65,8 +75,14 @@ typedef struct {
     int32_t tone_index;   /* 0..grid_rows-1 (ch0) or 0..grid_cols-1 (ch1) */
     double f_start_hz;
     double f_end_hz;
-    double amplitude_pct; /* 0-100 */
+    double amplitude_pct; /* 0-100, used when amplitude_comp_mode == STATIC */
     double phase_deg;
+    int32_t amplitude_comp_mode;    /* AWG_ENGINE_AMPLITUDE_* */
+    double amplitude_comp_a;
+    double amplitude_comp_b;
+    double amplitude_comp_f0_hz;
+    double amplitude_comp_sigma_hz;
+    double amplitude_reference_pct; /* 0-100, ignored when mode == STATIC */
 } AWGRoundRamp;
 
 typedef struct AWGEngine AWGEngine;

@@ -73,17 +73,17 @@ __global__ void awg_render_kernel(const AwgSegment* __restrict__ segments,
         const AwgSegment* seg = &segs[t];
         acc0 += __sinf(6.2831853071795864f *
                        awg_phase_cycles(awg_segment_total_phase_q64(seg, abs_sample))) *
-                seg->amplitude;
+                awg_segment_amplitude(seg, abs_sample);
     }
     float acc1 = 0.0f;
     for (int32_t t = 0; t < n_tones1; ++t) {
         const AwgSegment* seg = &segs[n_tones0 + t];
         acc1 += __sinf(6.2831853071795864f *
                        awg_phase_cycles(awg_segment_total_phase_q64(seg, abs_sample))) *
-                seg->amplitude;
+                awg_segment_amplitude(seg, abs_sample);
     }
 
-    /* seg->amplitude is normalised (amplitude_pct/100); DAC scaling happens here. */
+    /* awg_segment_amplitude is normalised (0-1); DAC scaling happens here. */
     const int32_t s0 = __float2int_rn(fminf(fmaxf(acc0, -1.0f), 1.0f) * max_value);
     const int32_t s1 = __float2int_rn(fminf(fmaxf(acc1, -1.0f), 1.0f) * max_value);
     out[i] = ((uint32_t)(uint16_t)(int16_t)s1 << 16) | (uint32_t)(uint16_t)(int16_t)s0;

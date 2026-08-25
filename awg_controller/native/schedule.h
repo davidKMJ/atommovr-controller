@@ -132,7 +132,8 @@ static inline int awg_schedule_build(AwgSchedule* sch, const double* batch_trave
         const AWGRoundRamp* rp = &ramps[r];
         const int32_t slot = awg_tone_slot(sch, rp->channel, rp->tone_index);
         awg_segment_build(&prev[slot], rp->f_start_hz, rp->f_start_hz, 0.0, 0, sample_rate_hz,
-                          0, 0ull, 0.0f);
+                          0, 0ull, 0.0f, AWG_ENGINE_AMPLITUDE_STATIC, 0.0f, 0.0f, 0.0f, 0.0f,
+                          0.0f);
     }
 
     int64_t cursor = 0;
@@ -165,7 +166,10 @@ static inline int awg_schedule_build(AwgSchedule* sch, const double* batch_trave
             AwgSegment* seg = &sch->segments[(int64_t)b * total_tones + slot];
             awg_segment_build(seg, rp->f_start_hz, rp->f_end_hz, dur, is_scurve,
                               sample_rate_hz, cursor, carry,
-                              (float)(rp->amplitude_pct / 100.0));
+                              (float)(rp->amplitude_pct / 100.0), rp->amplitude_comp_mode,
+                              (float)rp->amplitude_comp_a, (float)rp->amplitude_comp_b,
+                              (float)rp->amplitude_comp_f0_hz, (float)rp->amplitude_comp_sigma_hz,
+                              (float)(rp->amplitude_reference_pct / 100.0));
             double turns = rp->phase_deg / 360.0;
             turns -= floor(turns);
             seg->static_phase_q64 = (uint64_t)(turns * AWG_Q64_SCALE);
@@ -229,7 +233,9 @@ static inline int awg_schedule_hold_tail(AwgSchedule* tail, const AwgSchedule* r
 
         awg_segment_build(&tail->segments[slot], f_hold, f_hold, 0.0, 0,
                           round->sample_rate_hz, 0,
-                          awg_segment_phase_q64(src, at_sample), src->amplitude);
+                          awg_segment_phase_q64(src, at_sample),
+                          awg_segment_amplitude(src, at_sample), src->amp_mode, src->amp_a,
+                          src->amp_b, src->amp_f0_hz, src->amp_sigma_hz, src->amp_reference);
         tail->segments[slot].static_phase_q64 = src->static_phase_q64;
     }
     return 0;

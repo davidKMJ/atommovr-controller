@@ -39,7 +39,7 @@ from atommovr.utils.ErrorModel import ErrorModel
 from atommovr.utils.core import Configurations, PhysicalParams
 from atommovr.utils.errormodels import ZeroNoise
 
-from awg_controller.awg_control import AODSettings, AWGBatch, RFConverter
+from awg_controller.awg_control import AmplitudeCompensation, AODSettings, AWGBatch, RFConverter
 from awg_controller.awg_engine import AWGEngine, CardConfig
 
 from atommovr_controller.camera import Camera, OfflineArrayCamera
@@ -82,6 +82,11 @@ class HardwareConfig:
     output_load_ohms: float = 50.0
     aod_settings: AODSettings = field(default_factory=AODSettings)
     physical_params: PhysicalParams = field(default_factory=PhysicalParams)
+
+    #: Non-default. See ``RFConverter``/``AmplitudeCompensation``.
+    amplitude_compensation: Optional[AmplitudeCompensation] = None
+    #: Required iff amplitude_compensation is set.
+    reference_amplitude_pct: Optional[float] = None
 
 
 @dataclass
@@ -154,7 +159,12 @@ class AtommovrController:
         self.camera: Camera = camera
 
         self.algorithm = _ALGORITHM_REGISTRY[sw_config.algorithm_name]()
-        self.rf_converter = RFConverter(aod, hw_config.physical_params)
+        self.rf_converter = RFConverter(
+            aod,
+            hw_config.physical_params,
+            amplitude_compensation=hw_config.amplitude_compensation,
+            reference_amplitude_pct=hw_config.reference_amplitude_pct,
+        )
 
         err = (
             sw_config.error_model if sw_config.error_model is not None else ZeroNoise()

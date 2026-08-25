@@ -10,13 +10,14 @@
 #include <vector>
 
 static AWGRoundRamp ramp(int ch, int ti, double f0, double f1, double amp, double deg) {
-    AWGRoundRamp rp;
+    AWGRoundRamp rp = {};
     rp.channel = ch;
     rp.tone_index = ti;
     rp.f_start_hz = f0;
     rp.f_end_hz = f1;
     rp.amplitude_pct = amp;
     rp.phase_deg = deg;
+    rp.amplitude_comp_mode = AWG_ENGINE_AMPLITUDE_STATIC;
     return rp;
 }
 

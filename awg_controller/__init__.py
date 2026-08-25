@@ -6,6 +6,7 @@ Re-exports the public API so users can write::
 """
 
 from awg_controller.awg_control import (
+    AmplitudeCompensation,
     AODSettings,
     AWGBatch,
     RFConverter,
@@ -22,6 +23,7 @@ __all__ = [
     "AWGBatch",
     "RFRamp",
     "AODSettings",
+    "AmplitudeCompensation",
     "AWGEngine",
     "AWGEngineConfig",
     "CardConfig",
