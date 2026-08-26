@@ -46,16 +46,18 @@ def _pca_axis_angle(
     return _wrap_angle_deg(raw), main_axis, singular_values
 
 
-def fit_grid_and_assign(
+def centroid_grid_indices(
     centroids: np.ndarray,
     grid_shape: Tuple[int, int],
     image_shape: Optional[Tuple[int, int]] = None,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Map each (y, x) centroid to ``(row_idx, col_idx)`` on ``grid_shape``."""
     centroids = np.asarray(centroids)
     R, C = grid_shape
     N = len(centroids)
     if N == 0:
-        return np.zeros((R, C), dtype=int)
+        empty = np.empty(0, dtype=int)
+        return empty, empty
     if N < 3:
         if image_shape is not None:
             img_h, img_w = image_shape[:2]
@@ -67,8 +69,6 @@ def fit_grid_and_assign(
         col_spacing = img_w / max(C, 1)
         row_idx = np.round((centroids[:, 0] - min_y) / row_spacing).astype(int)
         col_idx = np.round((centroids[:, 1] - min_x) / col_spacing).astype(int)
-        row_idx = np.clip(row_idx, 0, R - 1)
-        col_idx = np.clip(col_idx, 0, C - 1)
     else:
         mean = centroids.mean(axis=0)
         centered = centroids - mean
@@ -78,9 +78,46 @@ def fit_grid_and_assign(
         col_bins = np.linspace(col_coords.min(), col_coords.max(), C + 1)
         row_idx = np.digitize(row_coords, row_bins) - 1
         col_idx = np.digitize(col_coords, col_bins) - 1
-        row_idx = np.clip(row_idx, 0, R - 1)
-        col_idx = np.clip(col_idx, 0, C - 1)
+    return np.clip(row_idx, 0, R - 1), np.clip(col_idx, 0, C - 1)
 
+
+def centroid_patch_sums(
+    image: np.ndarray,
+    centroids: np.ndarray,
+    win_size: int = 5,
+) -> np.ndarray:
+    """Background-subtracted integrated intensity around each (y, x) centroid."""
+    img = np.asarray(image, dtype=float)
+    if img.ndim == 3:
+        img = img.mean(axis=2)
+    cents = np.asarray(centroids, dtype=float)
+    if len(cents) == 0:
+        return np.empty(0, dtype=float)
+
+    background = float(np.median(img))
+    h, w = img.shape[:2]
+    yi = np.clip(np.rint(cents[:, 0]).astype(int), 0, h - 1)
+    xi = np.clip(np.rint(cents[:, 1]).astype(int), 0, w - 1)
+    padded = np.pad(img - background, win_size, mode="constant")
+    d = np.arange(-win_size, win_size + 1)
+    dy, dx = np.meshgrid(d, d, indexing="ij")
+    patches = padded[
+        yi[:, None, None] + win_size + dy[None, :, :],
+        xi[:, None, None] + win_size + dx[None, :, :],
+    ]
+    return np.maximum(patches, 0.0).sum(axis=(1, 2))
+
+
+def fit_grid_and_assign(
+    centroids: np.ndarray,
+    grid_shape: Tuple[int, int],
+    image_shape: Optional[Tuple[int, int]] = None,
+) -> np.ndarray:
+    centroids = np.asarray(centroids)
+    R, C = grid_shape
+    if len(centroids) == 0:
+        return np.zeros((R, C), dtype=int)
+    row_idx, col_idx = centroid_grid_indices(centroids, grid_shape, image_shape)
     binary = np.zeros((R, C), dtype=int)
     for r, c in zip(row_idx, col_idx):
         binary[r, c] = 1

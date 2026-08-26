@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -39,10 +39,44 @@ _AMPLITUDE_MODES: Dict[str, int] = {
 }
 
 
+GridOrigin = Literal["top left", "top right", "bottom left", "bottom right"]
+
+_GRID_ORIGINS: Dict[str, Tuple[bool, bool]] = {
+    "top left": (False, False),
+    "top right": (False, True),
+    "bottom left": (True, False),
+    "bottom right": (True, True),
+}
+
+
 def _amplitudes_from_powers(powers: np.ndarray) -> np.ndarray:
     if np.any(powers <= 0):
         raise ValueError("measured powers must be positive.")
     return np.sqrt(powers)
+
+
+def _parse_grid_origin(origin: str) -> Tuple[bool, bool]:
+    key = " ".join(origin.strip().lower().replace("_", " ").replace("-", " ").split())
+    if key not in _GRID_ORIGINS:
+        raise ValueError(
+            f"origin must be one of {sorted(_GRID_ORIGINS)}, got {origin!r}."
+        )
+    return _GRID_ORIGINS[key]
+
+
+def _normalize_and_average(grid: np.ndarray, axis: int) -> np.ndarray:
+    """Normalize each slice along ``axis``, then average those slices.
+
+    ``axis`` is the profiled axis (0 = rows/V, 1 = cols/H).
+    """
+    masked = np.where(grid > 0, grid, np.nan)
+    scale = np.nanmean(masked, axis=axis, keepdims=True)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        normed = masked / scale
+    avg = np.nanmean(normed, axis=1 - axis)
+    if not np.all(np.isfinite(avg)) or np.any(avg <= 0):
+        raise ValueError("could not form a positive power trace from the grid.")
+    return avg
 
 
 def _fit_linear(freqs_hz: np.ndarray, y: np.ndarray) -> Tuple[float, float]:
@@ -163,6 +197,40 @@ class AmplitudeCompensation:
         a, b, f0, sigma = _fit_gaussian(x, amplitudes)
         ref = a - b * math.exp(-((REFERENCE_FREQUENCY_HZ - f0) ** 2) / (2.0 * sigma**2))
         return cls("gaussian", a / ref, b / ref, f0, sigma)
+
+    @classmethod
+    def traces_from_grid(
+        cls,
+        powers: np.ndarray,
+        settings: "AODSettings",
+        origin: GridOrigin | str = "top left",
+    ) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
+        """Map a camera power grid to fit traces for each AOD axis.
+
+        ``origin`` is the grid corner at ``(f_min_v, f_min_h)``. Empty sites
+        (non-positive) are skipped. Returns
+        ``((freqs_v, powers_v), (freqs_h, powers_h))`` for ``fit_linear`` /
+        ``fit_gaussian`` (ch0 = V/row, ch1 = H/col).
+        """
+        grid = np.asarray(powers, dtype=float)
+        if grid.ndim != 2:
+            raise ValueError(f"powers must be 2-D; got shape {grid.shape}")
+        if grid.shape != (settings.grid_rows, settings.grid_cols):
+            raise ValueError(
+                f"powers shape {grid.shape} != grid "
+                f"({settings.grid_rows}, {settings.grid_cols})"
+            )
+        flip_rows, flip_cols = _parse_grid_origin(origin)
+        if flip_rows:
+            grid = grid[::-1]
+        if flip_cols:
+            grid = grid[:, ::-1]
+        freqs_v = settings.f_min_v + np.arange(settings.grid_rows) * settings.f_spacing_v
+        freqs_h = settings.f_min_h + np.arange(settings.grid_cols) * settings.f_spacing_h
+        return (freqs_v, _normalize_and_average(grid, axis=0)), (
+            freqs_h,
+            _normalize_and_average(grid, axis=1),
+        )
 
 
 # ---------------------------------------------------------------------------

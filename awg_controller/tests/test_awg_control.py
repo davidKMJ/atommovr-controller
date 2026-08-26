@@ -236,6 +236,87 @@ class TestAmplitudeCompensationFit:
             AmplitudeCompensation.fit_gaussian(freqs, np.array([1.0, -0.1, 1.0]))
 
 
+class TestTracesFromGrid:
+    def _settings(self, n=4):
+        return AODSettings(
+            f_min_v=80e6,
+            f_max_v=110e6,
+            f_min_h=70e6,
+            f_max_h=100e6,
+            grid_rows=n,
+            grid_cols=n,
+        )
+
+    def test_separable_grid_recovers_row_and_col_profiles(self):
+        settings = self._settings()
+        row_p = np.array([1.0, 2.0, 3.0, 4.0])
+        col_p = np.array([4.0, 3.0, 2.0, 1.0])
+        powers = np.outer(row_p, col_p)
+        (freqs_v, powers_v), (freqs_h, powers_h) = AmplitudeCompensation.traces_from_grid(
+            powers, settings, origin="top left"
+        )
+        assert freqs_v[0] == pytest.approx(80e6)
+        assert freqs_v[-1] == pytest.approx(110e6)
+        assert freqs_h[0] == pytest.approx(70e6)
+        assert freqs_h[-1] == pytest.approx(100e6)
+        np.testing.assert_allclose(powers_v / powers_v.mean(), row_p / row_p.mean())
+        np.testing.assert_allclose(powers_h / powers_h.mean(), col_p / col_p.mean())
+
+    def test_origin_flips_which_corner_is_f_min(self):
+        settings = self._settings()
+        row_p = np.array([1.0, 2.0, 3.0, 4.0])
+        col_p = np.array([4.0, 3.0, 2.0, 1.0])
+        powers = np.outer(row_p, col_p)
+
+        _, (freqs_h, powers_h) = AmplitudeCompensation.traces_from_grid(
+            powers, settings, origin="top right"
+        )
+        np.testing.assert_allclose(
+            powers_h / powers_h.mean(), col_p[::-1] / col_p[::-1].mean()
+        )
+        assert freqs_h[0] == pytest.approx(70e6)
+
+        (freqs_v, powers_v), _ = AmplitudeCompensation.traces_from_grid(
+            powers, settings, origin="bottom left"
+        )
+        np.testing.assert_allclose(
+            powers_v / powers_v.mean(), row_p[::-1] / row_p[::-1].mean()
+        )
+        assert freqs_v[0] == pytest.approx(80e6)
+
+        (freqs_v, powers_v), (freqs_h, powers_h) = AmplitudeCompensation.traces_from_grid(
+            powers, settings, origin="bottom right"
+        )
+        np.testing.assert_allclose(
+            powers_v / powers_v.mean(), row_p[::-1] / row_p[::-1].mean()
+        )
+        np.testing.assert_allclose(
+            powers_h / powers_h.mean(), col_p[::-1] / col_p[::-1].mean()
+        )
+
+    def test_empty_sites_are_skipped(self):
+        settings = self._settings()
+        row_p = np.array([1.0, 2.0, 3.0, 4.0])
+        col_p = np.array([4.0, 3.0, 2.0, 1.0])
+        powers = np.outer(row_p, col_p)
+        powers[1, 2] = 0.0
+        (freqs_v, powers_v), (freqs_h, powers_h) = AmplitudeCompensation.traces_from_grid(
+            powers, settings
+        )
+        assert np.all(powers_v > 0)
+        assert np.all(powers_h > 0)
+        AmplitudeCompensation.fit_linear(freqs_v, powers_v)
+        AmplitudeCompensation.fit_linear(freqs_h, powers_h)
+
+    def test_rejects_bad_origin_and_shape(self):
+        settings = self._settings()
+        powers = np.ones((4, 4))
+        with pytest.raises(ValueError, match="origin must be one of"):
+            AmplitudeCompensation.traces_from_grid(powers, settings, origin="center")
+        with pytest.raises(ValueError, match="powers shape"):
+            AmplitudeCompensation.traces_from_grid(np.ones((3, 4)), settings)
+
+
 class TestAODSettingsMapping:
     """Imaging assigns sites; RF maps those indices with f_min/f_max only."""
 

@@ -121,6 +121,23 @@ class TestOfflineArrayCamera:
         cam.sync(array)
         assert array.matrix[:, :, 0].sum() == 16
 
+    def test_read_power_returns_grid_intensities(self):
+        gen = GaussianCameraConfig(
+            image_shape=(128, 128), min_spacing_px=16.0, noise_level=0.0
+        )
+        occ = np.ones((4, 4), dtype=int)
+        occ[0, 0] = 0
+        occ[3, 2] = 0
+        cam = RealArrayCamera((4, 4), camera_fn=lambda: gen(occ))
+        frame = cam.acquire()
+        powers = cam.read_power(frame)
+        assert powers.shape == (4, 4)
+        assert powers[0, 0] == 0.0
+        assert powers[3, 2] == 0.0
+        occupied = powers[occ.astype(bool)]
+        assert occupied.size == 14
+        assert np.all(occupied > 0)
+
     def test_controller_multi_round_occupancy_continuity(self):
         rows, cols = 6, 5
         target = (2, 2)

@@ -13,6 +13,8 @@ from atommovr.utils.core import PhysicalParams, random_loading
 
 from atommovr_controller.imaging.extraction import (
     BlobDetection,
+    centroid_grid_indices,
+    centroid_patch_sums,
     estimate_grid_rotation_fit_rect,
     fit_grid_and_assign,
     inverse_rotate_centroids,
@@ -32,8 +34,8 @@ class Camera(abc.ABC):
 
     Subclasses implement ``acquire()`` (a raw grayscale frame) and
     ``sync(array)`` (reconcile with the controller's global ``AtomArray``).
-    ``detect_occupancy`` is a concrete, shared blob-detect -> rotation-correct
-    -> grid-assign pipeline used by both.
+    ``detect_occupancy`` and ``read_power`` share the blob-detect ->
+    rotation-correct -> grid-assign pipeline.
     """
 
     def __init__(
@@ -55,12 +57,8 @@ class Camera(abc.ABC):
     def sync(self, array: AtomArray) -> None:
         """Reconcile this camera's occupancy with ``array``."""
 
-    def detect_occupancy(self, image: np.ndarray) -> np.ndarray:
-        """Blob detect -> rotation correct -> grid assign.
-
-        Returns a binary occupancy matrix, shape ``grid_shape``, dtype int.
-        Updates ``self.grid_rotation`` with the last estimated angle.
-        """
+    def _centroids(self, image: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Return ``(image-space, rotation-corrected)`` centroids."""
         blob_params = self.blob_params
         if isinstance(blob_params, dict):
             blob_params = None  # OpenCV expects a SimpleBlobDetector_Params object
@@ -68,21 +66,45 @@ class Camera(abc.ABC):
         detector = BlobDetection(shape=self.grid_shape, blob_params=blob_params)
         centroids, _ = detector.extract(image)
         if len(centroids) == 0:
-            return np.zeros(self.grid_shape, dtype=int)
+            return centroids, centroids
 
         rotation = estimate_grid_rotation_fit_rect(centroids)
         self.grid_rotation = rotation
-
+        assigned = centroids
         if abs(rotation) > 0.01:
-            centroids = inverse_rotate_centroids(
+            assigned = inverse_rotate_centroids(
                 centroids, image_shape=image.shape[:2], angle_deg=rotation
             )
+        return centroids, assigned
 
+    def detect_occupancy(self, image: np.ndarray) -> np.ndarray:
+        """Blob detect -> rotation correct -> grid assign.
+
+        Returns a binary occupancy matrix, shape ``grid_shape``, dtype int.
+        Updates ``self.grid_rotation`` with the last estimated angle.
+        """
+        _, assigned = self._centroids(image)
+        if len(assigned) == 0:
+            return np.zeros(self.grid_shape, dtype=int)
         return fit_grid_and_assign(
-            centroids,
+            assigned,
             self.grid_shape,
             image_shape=image.shape[:2],
         )
+
+    def read_power(self, image: np.ndarray, *, window: int = 5) -> np.ndarray:
+        """Per-site integrated intensity, shape ``grid_shape``. Empty sites are 0."""
+        raw, assigned = self._centroids(image)
+        powers = np.zeros(self.grid_shape, dtype=float)
+        if len(raw) == 0:
+            return powers
+        row_idx, col_idx = centroid_grid_indices(
+            assigned, self.grid_shape, image_shape=image.shape[:2]
+        )
+        intensities = centroid_patch_sums(image, raw, win_size=window)
+        for r, c, p in zip(row_idx, col_idx, intensities):
+            powers[r, c] = max(powers[r, c], float(p))
+        return powers
 
     def _measure_into(self, array: AtomArray) -> np.ndarray:
         """Acquire + detect, then write the reading into ``array.matrix``."""
