@@ -84,8 +84,9 @@ class HardwareConfig:
     physical_params: PhysicalParams = field(default_factory=PhysicalParams)
 
     #: Non-default. See ``RFConverter``/``AmplitudeCompensation``.
-    amplitude_compensation: Optional[AmplitudeCompensation] = None
-    #: Required iff amplitude_compensation is set.
+    amplitude_compensation_ch0: Optional[AmplitudeCompensation] = None
+    amplitude_compensation_ch1: Optional[AmplitudeCompensation] = None
+    #: Required iff either compensation is set.
     reference_amplitude_pct: Optional[float] = None
 
 
@@ -162,7 +163,8 @@ class AtommovrController:
         self.rf_converter = RFConverter(
             aod,
             hw_config.physical_params,
-            amplitude_compensation=hw_config.amplitude_compensation,
+            amplitude_compensation_ch0=hw_config.amplitude_compensation_ch0,
+            amplitude_compensation_ch1=hw_config.amplitude_compensation_ch1,
             reference_amplitude_pct=hw_config.reference_amplitude_pct,
         )
 

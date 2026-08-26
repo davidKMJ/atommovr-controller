@@ -39,13 +39,19 @@ _AMPLITUDE_MODES: Dict[str, int] = {
 }
 
 
-def _fit_linear(freqs_hz: np.ndarray, powers: np.ndarray) -> Tuple[float, float]:
-    b, a = np.polyfit(freqs_hz, powers, 1)
+def _amplitudes_from_powers(powers: np.ndarray) -> np.ndarray:
+    if np.any(powers <= 0):
+        raise ValueError("measured powers must be positive.")
+    return np.sqrt(powers)
+
+
+def _fit_linear(freqs_hz: np.ndarray, y: np.ndarray) -> Tuple[float, float]:
+    b, a = np.polyfit(freqs_hz, y, 1)
     return float(a), float(b)
 
 
 def _fit_gaussian(
-    freqs_hz: np.ndarray, powers: np.ndarray, iters: int = 100
+    freqs_hz: np.ndarray, y: np.ndarray, iters: int = 100
 ) -> Tuple[float, float, float, float]:
     """Levenberg-Marquardt in frequency units normalized to O(1) (raw Hz
     values make the Jacobian ill-conditioned).
@@ -54,10 +60,10 @@ def _fit_gaussian(
     f_scale = float(freqs_hz.std()) or 1.0
     x = (freqs_hz - f_mid) / f_scale
 
-    baseline = 0.5 * (float(powers[0]) + float(powers[-1]))
-    idx = int(np.argmax(np.abs(powers - baseline)))
+    baseline = 0.5 * (float(y[0]) + float(y[-1]))
+    idx = int(np.argmax(np.abs(y - baseline)))
     x0 = float(x[idx])
-    b = float(baseline - powers[idx]) or 1.0
+    b = float(baseline - y[idx]) or 1.0
     a = baseline
     s = max((x.max() - x.min()) / 6.0, 1e-3)
     p = np.array([a, b, x0, s], dtype=float)
@@ -66,7 +72,7 @@ def _fit_gaussian(
         a, b, x0, s = p
         d = x - x0
         e = np.exp(-(d**2) / (2.0 * s**2))
-        return powers - (a - b * e), e, d
+        return y - (a - b * e), e, d
 
     resid, e, d = residual(p)
     cost = float(resid @ resid)
@@ -122,7 +128,9 @@ class AmplitudeCompensation:
 
     def __post_init__(self) -> None:
         if self.mode not in _AMPLITUDE_MODES:
-            raise ValueError(f"mode must be one of {sorted(_AMPLITUDE_MODES)}, got {self.mode!r}.")
+            raise ValueError(
+                f"mode must be one of {sorted(_AMPLITUDE_MODES)}, got {self.mode!r}."
+            )
 
     def __call__(self, f_hz: float) -> float:
         if self.mode == "linear":
@@ -131,25 +139,28 @@ class AmplitudeCompensation:
         return self.a - self.b * math.exp(-(d * d) / (2.0 * self.sigma_hz**2))
 
     @classmethod
-    def fit_linear(cls, freqs_hz: Sequence[float], powers: Sequence[float]) -> "AmplitudeCompensation":
-        """Regress measured (frequency, power) points to ``a + b*f``, then
-        normalize so the fit equals 1.0 at ``REFERENCE_FREQUENCY_HZ``.
+    def fit_linear(
+        cls, freqs_hz: Sequence[float], powers: Sequence[float]
+    ) -> "AmplitudeCompensation":
+        """Regress ``sqrt(power)`` to ``a + b*f``, then normalize so the
+        fit equals 1.0 at ``REFERENCE_FREQUENCY_HZ``.
         """
         x = np.asarray(freqs_hz, dtype=float)
-        y = np.asarray(powers, dtype=float)
-        a, b = _fit_linear(x, y)
+        amplitudes = _amplitudes_from_powers(np.asarray(powers, dtype=float))
+        a, b = _fit_linear(x, amplitudes)
         ref = a + b * REFERENCE_FREQUENCY_HZ
         return cls("linear", a / ref, b / ref)
 
     @classmethod
-    def fit_gaussian(cls, freqs_hz: Sequence[float], powers: Sequence[float]) -> "AmplitudeCompensation":
-        """Regress measured (frequency, power) points to
-        ``a - b*exp(-(f-f0)^2/(2*sigma^2))``, then normalize so the fit
-        equals 1.0 at ``REFERENCE_FREQUENCY_HZ``.
+    def fit_gaussian(
+        cls, freqs_hz: Sequence[float], powers: Sequence[float]
+    ) -> "AmplitudeCompensation":
+        """Regress ``sqrt(power)`` to ``a - b*exp(-(f-f0)^2/(2*sigma^2))``,
+        then normalize so the fit equals 1.0 at ``REFERENCE_FREQUENCY_HZ``.
         """
         x = np.asarray(freqs_hz, dtype=float)
-        y = np.asarray(powers, dtype=float)
-        a, b, f0, sigma = _fit_gaussian(x, y)
+        amplitudes = _amplitudes_from_powers(np.asarray(powers, dtype=float))
+        a, b, f0, sigma = _fit_gaussian(x, amplitudes)
         ref = a - b * math.exp(-((REFERENCE_FREQUENCY_HZ - f0) ** 2) / (2.0 * sigma**2))
         return cls("gaussian", a / ref, b / ref, f0, sigma)
 
@@ -269,18 +280,18 @@ class RFConverter:
 
     Amplitude budget rule:
         Default (equal-power): per-tone amplitude = 40 % / n_simultaneous_tones_on_channel.
-        With ``amplitude_compensation``: per-tone amplitude =
-        ``reference_amplitude_pct * amplitude_compensation(f)``, not
+        With compensation: per-tone amplitude =
+        ``reference_amplitude_pct * compensation(f)``, not
         renormalized (raises if it exceeds the 40 % budget).
 
     Parameters
     ----------
     settings : AODSettings
     physical_params : PhysicalParams
-    amplitude_compensation : AmplitudeCompensation, optional
-        Non-default.
+    amplitude_compensation_ch0, amplitude_compensation_ch1 : AmplitudeCompensation, optional
+        Non-default. Channel 0 = V/row, channel 1 = H/col.
     reference_amplitude_pct : float, optional
-        Required iff ``amplitude_compensation`` is set: the amplitude (%)
+        Required iff either compensation is set: the amplitude (%)
         at ``REFERENCE_FREQUENCY_HZ``, i.e. where the compensation ratio is 1.0.
     """
 
@@ -288,18 +299,21 @@ class RFConverter:
         self,
         settings: AODSettings,
         physical_params: PhysicalParams,
-        amplitude_compensation: Optional[AmplitudeCompensation] = None,
+        amplitude_compensation_ch0: Optional[AmplitudeCompensation] = None,
+        amplitude_compensation_ch1: Optional[AmplitudeCompensation] = None,
         reference_amplitude_pct: Optional[float] = None,
     ) -> None:
-        if amplitude_compensation is not None and not (
-            reference_amplitude_pct and reference_amplitude_pct > 0
-        ):
+        if (
+            amplitude_compensation_ch0 is not None
+            or amplitude_compensation_ch1 is not None
+        ) and not (reference_amplitude_pct and reference_amplitude_pct > 0):
             raise ValueError(
                 "reference_amplitude_pct must be a positive % when amplitude_compensation is set."
             )
         self.settings = settings
         self.params = physical_params
-        self.amplitude_compensation = amplitude_compensation
+        self.amplitude_compensation_ch0 = amplitude_compensation_ch0
+        self.amplitude_compensation_ch1 = amplitude_compensation_ch1
         self.reference_amplitude_pct = reference_amplitude_pct
 
     # ------------------------------------------------------------------
@@ -316,20 +330,30 @@ class RFConverter:
         """Travel duration (s) for the longest move in the batch."""
         return travel_duration_s(moves, self.params.spacing, self.params.AOD_speed)
 
-    def _tone_amplitudes(self, freqs: List[float]) -> List[float]:
+    def _compensation_for_channel(
+        self, channel: int
+    ) -> Optional[AmplitudeCompensation]:
+        if channel == 0:
+            return self.amplitude_compensation_ch0
+        if channel == 1:
+            return self.amplitude_compensation_ch1
+        raise ValueError(f"channel must be 0 or 1, got {channel}.")
+
+    def _tone_amplitudes(
+        self, freqs: List[float], compensation: Optional[AmplitudeCompensation]
+    ) -> List[float]:
         """Per-tone amplitudes (%) for one channel.
 
-        Default (``amplitude_compensation is None``): ``40 % / n``,
-        independent of ``freqs``. Otherwise
-        ``reference_amplitude_pct * amplitude_compensation(f)``, not
-        renormalized -- only checked against the 40 % per-channel budget.
+        Default (``compensation is None``): ``40 % / n``, independent of
+        ``freqs``. Otherwise ``reference_amplitude_pct * compensation(f)``,
+        not renormalized -- only checked against the 40 % per-channel budget.
         """
         n = len(freqs)
         if n <= 0:
             return []
-        if self.amplitude_compensation is None:
+        if compensation is None:
             return [MAX_AMPLITUDE_PCT_PER_CHANNEL / n] * n
-        amps = [self.reference_amplitude_pct * self.amplitude_compensation(f) for f in freqs]
+        amps = [self.reference_amplitude_pct * compensation(f) for f in freqs]
         if any(a <= 0 for a in amps):
             raise ValueError("amplitude_compensation must yield positive amplitudes.")
         total = sum(amps)
@@ -340,17 +364,16 @@ class RFConverter:
             )
         return amps
 
-    def _ramp_kwargs(self) -> dict:
-        """Native amplitude-compensation fields shared by every ramp in a batch."""
-        if self.amplitude_compensation is None:
+    def _ramp_kwargs(self, compensation: Optional[AmplitudeCompensation]) -> dict:
+        """Native amplitude-compensation fields for one channel's ramps."""
+        if compensation is None:
             return {}
-        comp = self.amplitude_compensation
         return dict(
-            amplitude_comp_mode=_AMPLITUDE_MODES[comp.mode],
-            amplitude_comp_a=comp.a,
-            amplitude_comp_b=comp.b,
-            amplitude_comp_f0_hz=comp.f0_hz,
-            amplitude_comp_sigma_hz=comp.sigma_hz,
+            amplitude_comp_mode=_AMPLITUDE_MODES[compensation.mode],
+            amplitude_comp_a=compensation.a,
+            amplitude_comp_b=compensation.b,
+            amplitude_comp_f0_hz=compensation.f0_hz,
+            amplitude_comp_sigma_hz=compensation.sigma_hz,
             amplitude_reference_pct=self.reference_amplitude_pct,
         )
 
@@ -369,9 +392,12 @@ class RFConverter:
         n_h = self.settings.grid_cols
         freqs_v = [self._row_to_freq(i) for i in range(n_v)]
         freqs_h = [self._col_to_freq(j) for j in range(n_h)]
-        amps_v = self._tone_amplitudes(freqs_v)
-        amps_h = self._tone_amplitudes(freqs_h)
-        comp_kwargs = self._ramp_kwargs()
+        comp_v = self._compensation_for_channel(0)
+        comp_h = self._compensation_for_channel(1)
+        amps_v = self._tone_amplitudes(freqs_v, comp_v)
+        amps_h = self._tone_amplitudes(freqs_h, comp_h)
+        kwargs_v = self._ramp_kwargs(comp_v)
+        kwargs_h = self._ramp_kwargs(comp_h)
 
         ramps: List[RFRamp] = []
         for i, f in enumerate(freqs_v):
@@ -382,7 +408,7 @@ class RFConverter:
                     f_end=f,
                     amplitude_pct=amps_v[i],
                     tone_index=i,
-                    **comp_kwargs,
+                    **kwargs_v,
                 )
             )
         for j, f in enumerate(freqs_h):
@@ -393,7 +419,7 @@ class RFConverter:
                     f_end=f,
                     amplitude_pct=amps_h[j],
                     tone_index=j,
-                    **comp_kwargs,
+                    **kwargs_h,
                 )
             )
         return AWGBatch(ramps=ramps, travel_duration_s=0.0)
@@ -465,9 +491,16 @@ class RFConverter:
                 )
             target_cols.append(target_col)
 
-        amps_v = self._tone_amplitudes([self._row_to_freq(t) for t in target_rows])
-        amps_h = self._tone_amplitudes([self._col_to_freq(t) for t in target_cols])
-        comp_kwargs = self._ramp_kwargs()
+        comp_v = self._compensation_for_channel(0)
+        comp_h = self._compensation_for_channel(1)
+        amps_v = self._tone_amplitudes(
+            [self._row_to_freq(t) for t in target_rows], comp_v
+        )
+        amps_h = self._tone_amplitudes(
+            [self._col_to_freq(t) for t in target_cols], comp_h
+        )
+        kwargs_v = self._ramp_kwargs(comp_v)
+        kwargs_h = self._ramp_kwargs(comp_h)
 
         ramps: List[RFRamp] = []
         for row_idx, target_row in enumerate(target_rows):
@@ -479,7 +512,7 @@ class RFConverter:
                     amplitude_pct=amps_v[row_idx],
                     duration_s=duration_s,
                     tone_index=row_idx,
-                    **comp_kwargs,
+                    **kwargs_v,
                 )
             )
         for col_idx, target_col in enumerate(target_cols):
@@ -491,7 +524,7 @@ class RFConverter:
                     amplitude_pct=amps_h[col_idx],
                     duration_s=duration_s,
                     tone_index=col_idx,
-                    **comp_kwargs,
+                    **kwargs_h,
                 )
             )
 

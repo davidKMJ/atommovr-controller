@@ -86,7 +86,7 @@ class TestAmplitudeCompensation:
         settings = AODSettings(grid_rows=3, grid_cols=3)
         comp = AmplitudeCompensation("linear", a=1.0, b=0.0)
         with pytest.raises(ValueError, match="reference_amplitude_pct"):
-            RFConverter(settings, PhysicalParams(), amplitude_compensation=comp)
+            RFConverter(settings, PhysicalParams(), amplitude_compensation_ch0=comp)
 
     def test_invalid_mode_raises(self):
         with pytest.raises(ValueError, match="mode must be one of"):
@@ -99,7 +99,11 @@ class TestAmplitudeCompensation:
         )
         comp = AmplitudeCompensation("linear", a=1.0, b=0.0)  # ratio(f) == 1 everywhere
         conv = RFConverter(
-            settings, PhysicalParams(), amplitude_compensation=comp, reference_amplitude_pct=3.0
+            settings,
+            PhysicalParams(),
+            amplitude_compensation_ch0=comp,
+            amplitude_compensation_ch1=comp,
+            reference_amplitude_pct=3.0,
         )
         holding = conv.holding_config()
         ch0 = [r for r in holding.ramps if r.channel == 0]
@@ -112,7 +116,10 @@ class TestAmplitudeCompensation:
         settings = AODSettings(grid_rows=10, grid_cols=10)
         comp = AmplitudeCompensation("linear", a=1.0, b=0.0)
         conv = RFConverter(
-            settings, PhysicalParams(), amplitude_compensation=comp, reference_amplitude_pct=5.0
+            settings,
+            PhysicalParams(),
+            amplitude_compensation_ch0=comp,
+            reference_amplitude_pct=5.0,
         )
         with pytest.raises(ValueError, match="per-channel budget"):
             conv.holding_config()
@@ -121,7 +128,10 @@ class TestAmplitudeCompensation:
         settings = AODSettings(grid_rows=3, grid_cols=3, f_min_v=-1e6, f_max_v=1e6)
         comp = AmplitudeCompensation("linear", a=0.0, b=1.0)  # ratio(0 Hz) == 0
         conv = RFConverter(
-            settings, PhysicalParams(), amplitude_compensation=comp, reference_amplitude_pct=1.0
+            settings,
+            PhysicalParams(),
+            amplitude_compensation_ch0=comp,
+            reference_amplitude_pct=1.0,
         )
         with pytest.raises(ValueError, match="positive amplitudes"):
             conv.holding_config()
@@ -135,7 +145,8 @@ class TestAmplitudeCompensation:
         conv = RFConverter(
             settings,
             PhysicalParams(AOD_speed=0.1, spacing=5e-6),
-            amplitude_compensation=comp,
+            amplitude_compensation_ch0=comp,
+            amplitude_compensation_ch1=comp,
             reference_amplitude_pct=3.0,
         )
         batch = conv.convert_moves([Move(0, 0, 1, 0)])
@@ -147,24 +158,82 @@ class TestAmplitudeCompensation:
             assert r.amplitude_comp_sigma_hz == pytest.approx(15e6)
             assert r.amplitude_reference_pct == pytest.approx(3.0)
 
+    def test_channels_use_independent_compensation(self):
+        settings = AODSettings(
+            f_min_v=80e6, f_max_v=89e6, f_min_h=80e6, f_max_h=89e6,
+            grid_rows=4, grid_cols=4,
+        )
+        comp0 = AmplitudeCompensation("linear", a=1.0, b=0.0)
+        comp1 = AmplitudeCompensation("gaussian", a=1.2, b=0.6, f0_hz=100e6, sigma_hz=15e6)
+        conv = RFConverter(
+            settings,
+            PhysicalParams(),
+            amplitude_compensation_ch0=comp0,
+            amplitude_compensation_ch1=comp1,
+            reference_amplitude_pct=3.0,
+        )
+        holding = conv.holding_config()
+        ch0 = [r for r in holding.ramps if r.channel == 0]
+        ch1 = [r for r in holding.ramps if r.channel == 1]
+        assert all(r.amplitude_comp_mode == 1 for r in ch0)
+        assert all(r.amplitude_comp_mode == 2 for r in ch1)
+        assert all(r.amplitude_pct == pytest.approx(3.0) for r in ch0)
+        assert not all(r.amplitude_pct == pytest.approx(3.0) for r in ch1)
+        for r in ch1:
+            assert r.amplitude_pct == pytest.approx(3.0 * comp1(r.f_start))
+
+    def test_uncompensated_channel_stays_equal_power(self):
+        settings = AODSettings(grid_rows=4, grid_cols=4)
+        comp = AmplitudeCompensation("linear", a=1.0, b=0.0)
+        conv = RFConverter(
+            settings,
+            PhysicalParams(),
+            amplitude_compensation_ch0=comp,
+            reference_amplitude_pct=3.0,
+        )
+        holding = conv.holding_config()
+        ch0 = [r for r in holding.ramps if r.channel == 0]
+        ch1 = [r for r in holding.ramps if r.channel == 1]
+        assert all(r.amplitude_comp_mode == 1 for r in ch0)
+        assert all(r.amplitude_comp_mode == 0 for r in ch1)
+        assert all(
+            r.amplitude_pct == pytest.approx(MAX_AMPLITUDE_PCT_PER_CHANNEL / 4) for r in ch1
+        )
+
 
 class TestAmplitudeCompensationFit:
-    def test_fit_linear_reference_is_one(self):
+    def test_fit_linear_from_power_matches_sqrt_amplitude(self):
         freqs = np.linspace(80e6, 121e6, 20)
-        powers = 2.0 + 3e-9 * freqs
+        amplitudes = 2.0 + 3e-9 * freqs
+        powers = amplitudes**2
         comp = AmplitudeCompensation.fit_linear(freqs, powers)
         assert comp.mode == "linear"
         assert comp(REFERENCE_FREQUENCY_HZ) == pytest.approx(1.0)
-        assert comp(freqs[-1]) > comp(freqs[0])
+        ref = 2.0 + 3e-9 * REFERENCE_FREQUENCY_HZ
+        for f, a in zip(freqs, amplitudes):
+            assert comp(f) == pytest.approx(a / ref)
 
-    def test_fit_gaussian_reference_is_one_and_recovers_dip(self):
+    def test_fit_gaussian_from_power_recovers_amplitude_dip(self):
         freqs = np.linspace(80e6, 121e6, 40)
         true_f0, true_sigma = 100e6, 10e6
-        powers = 1.0 - 0.3 * np.exp(-((freqs - true_f0) ** 2) / (2 * true_sigma**2))
+        amplitudes = 1.0 - 0.3 * np.exp(-((freqs - true_f0) ** 2) / (2 * true_sigma**2))
+        powers = amplitudes**2
         comp = AmplitudeCompensation.fit_gaussian(freqs, powers)
         assert comp.mode == "gaussian"
         assert comp(REFERENCE_FREQUENCY_HZ) == pytest.approx(1.0, abs=1e-6)
         assert comp.f0_hz == pytest.approx(true_f0, rel=0.05)
+        ref = 1.0 - 0.3 * np.exp(
+            -((REFERENCE_FREQUENCY_HZ - true_f0) ** 2) / (2 * true_sigma**2)
+        )
+        for f, a in zip(freqs, amplitudes):
+            assert comp(f) == pytest.approx(a / ref, rel=1e-3)
+
+    def test_fit_rejects_non_positive_power(self):
+        freqs = np.array([80e6, 100e6, 120e6])
+        with pytest.raises(ValueError, match="powers must be positive"):
+            AmplitudeCompensation.fit_linear(freqs, np.array([1.0, 0.0, 1.0]))
+        with pytest.raises(ValueError, match="powers must be positive"):
+            AmplitudeCompensation.fit_gaussian(freqs, np.array([1.0, -0.1, 1.0]))
 
 
 class TestAODSettingsMapping:
