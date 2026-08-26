@@ -5,7 +5,7 @@
 
 ## How to Start
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/). Then:
+### Repository
 
 ```bash
 git clone --recurse-submodules https://github.com/davidKMJ/atommovr-controller.git
@@ -18,6 +18,19 @@ uv sync
 ```bash
 git submodule update --init --recursive
 ```
+
+### Alvium Camera
+
+The Alvium 1800 U-052m uses Allied Vision’s Vimba X SDK and VmbPy Python API.
+
+1. Install Vimba X from the Allied Vision website. This provides the camera runtime and USB transport layer required by VmbPy.
+2. Verify that the camera is detected using Vimba X Viewer.
+
+Vimba X must be installed separately; vmbpy alone does not provide the underlying camera runtime and USB transport layer.
+
+### Dependencies
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/). Then:
 
 `uv sync` is enough for algorithms, imaging, simulation, tests, and the notebook. Driving a real Spectrum card (Linux/NVIDIA) needs the extra plus the driver / IOMMU steps in [setup_guide.md](setup_guide.md):
 

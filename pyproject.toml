@@ -45,6 +45,7 @@ hardware = [
   "spcm",
   "cuda-python ; sys_platform == 'linux'",
   "cupy-cuda12x[ctk] ; sys_platform == 'linux'",
+  "vmbpy",
 ]
 
 [tool.pytest.ini_options]
