@@ -3,6 +3,8 @@
 ![Static Badge](https://img.shields.io/badge/status-in_progress-orange?style=for-the-badge)
 ![Static Badge](https://img.shields.io/badge/type-research-purple?style=for-the-badge)
 
+A hardware control stack for Atommovr, integrating camera acquisition, a CUDA-based RF/AWG loop, and AOD modulation for real-time optical tweezer array control.
+
 ## How to Start
 
 ### Repository
