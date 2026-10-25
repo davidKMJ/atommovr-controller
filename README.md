@@ -5,6 +5,8 @@
 
 A hardware control stack for Atommovr, integrating camera acquisition, a CUDA-based RF/AWG loop, and AOD modulation for real-time optical tweezer array control.
 
+![Array Image](array_img.jpg)
+
 ## How to Start
 
 ### Repository
